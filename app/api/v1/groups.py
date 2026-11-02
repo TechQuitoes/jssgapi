@@ -225,12 +225,18 @@ async def list_groups(
         return ok("Groups fetched successfully", sheet_items)
 
     repo = GroupRepository(db)
+
+    # OLD SCOPE RESTRICTION (commented out - restored if needed):
     # Anonymous callers see every group. An authenticated GROUP_ADMIN sees only
     # their own group; without this, the search box would leak the rest.
-    visible_group = None
-    if current_user is not None:
-        scope = await get_access_scope(db, current_user)
-        visible_group = None if scope.unrestricted else scope.group_id
+    # visible_group = None
+    # if current_user is not None:
+    #     scope = await get_access_scope(db, current_user)
+    #     visible_group = None if scope.unrestricted else scope.group_id
+
+    # All authenticated roles (Group Admin, Member, Super Admin) see all groups.
+    # Only restrict by explicit query param if provided.
+    visible_group = None  # no role-based restriction
     if query:
         groups = await repo.search(
             query,

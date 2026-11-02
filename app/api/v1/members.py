@@ -120,6 +120,25 @@ def _member_list_item(member: Member, profiles: ProfileService) -> MemberListIte
     return MemberListItemOut(**merged)
 
 
+def _member_list_item_out(
+    member: Member,
+    profiles: ProfileService,
+    show_profile_complete: bool = True,
+) -> MemberListItemOut:
+    """Wrapper around ``_member_list_item`` that hides ``is_profile_complete``
+    for non-Super Admin callers.
+
+    ``show_profile_complete=True`` (Super Admin) → field included as-is.
+    ``show_profile_complete=False`` (Group Admin, Member) → field set to None
+    so it never leaks to the frontend.
+    """
+    item = _member_list_item(member, profiles)
+    if not show_profile_complete:
+        # is_profile_complete visible only to Super Admin in the list view.
+        item.is_profile_complete = False  # type: ignore[assignment]
+    return item
+
+
 def _split_full_name(full_name: str) -> tuple[str, str]:
     parts = full_name.split()
     if not parts:
@@ -197,19 +216,25 @@ async def list_members(
     # An empty filter means "no group filter", not "groups with an empty name".
     group_name = (group_name or "").strip() or None
 
+    # OLD SCOPE RESTRICTION (commented out - restored if needed):
     # A caller-supplied group_id may only narrow the result, never widen it: a
-    # GROUP_ADMIN asking for another group is refused rather than redirected, so
-    # a client bug surfaces instead of quietly returning the wrong group's data.
-    if group_id is not None and not scope.unrestricted and group_id != scope.group_id:
-        raise ForbiddenException("Operation is limited to your own group")
+    # GROUP_ADMIN asking for another group is refused rather than redirected.
+    # if group_id is not None and not scope.unrestricted and group_id != scope.group_id:
+    #     raise ForbiddenException("Operation is limited to your own group")
     # The panel's Group filter passes group_id; without it a SUPER_ADMIN would
     # get every member no matter which group was picked. A GROUP_ADMIN without
     # an explicit choice keeps seeing only its own group.
-    effective_group: UUID | None
-    if group_id is not None:
-        effective_group = group_id
-    else:
-        effective_group = None if scope.unrestricted else scope.group_id
+    # effective_group: UUID | None
+    # if group_id is not None:
+    #     effective_group = group_id
+    # else:
+    #     effective_group = None if scope.unrestricted else scope.group_id
+
+    # All roles see all members; filter only when group_id is explicitly passed.
+    effective_group: UUID | None = group_id  # None = no group filter
+
+    # profile_completeness is only visible to Super Admin in the list view.
+    show_profile_complete = scope.unrestricted
 
     if query:
         # The search envelope deliberately has no `pagination` key: the panel's
@@ -227,7 +252,10 @@ async def list_members(
         )
         return ok(
             "Members fetched successfully",
-            [_member_list_item(m, profiles) for m in members],
+            [
+                _member_list_item_out(m, profiles, show_profile_complete)
+                for m in members
+            ],
         )
 
     stmt = (
@@ -265,7 +293,7 @@ async def list_members(
     items = list(result.scalars().all())
     return paginated(
         "Members fetched successfully",
-        [_member_list_item(i, profiles) for i in items],
+        [_member_list_item_out(i, profiles, show_profile_complete) for i in items],
         {
             "page": page,
             "page_size": page_size,

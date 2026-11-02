@@ -86,13 +86,19 @@ async def _trustee_listing(
         .where(Member.is_deleted.is_(False))
         .options(*MEMBER_PROFILE_LOADS)
     )
+    # OLD SCOPE RESTRICTION (commented out - restored if needed):
     # The trustees of a group are read group-scoped, exactly like the board:
     # a GROUP_ADMIN sees only the trustees of its own group.
-    effective_group = group_id if scope.unrestricted else scope.group_id
-    if effective_group is not None:
-        stmt = stmt.where(member_group_filter(effective_group))
-    if scope.member_id is not None and scope.group_id is None:
-        stmt = stmt.where(Member.id == scope.member_id)
+    # effective_group = group_id if scope.unrestricted else scope.group_id
+    # if effective_group is not None:
+    #     stmt = stmt.where(member_group_filter(effective_group))
+    # if scope.member_id is not None and scope.group_id is None:
+    #     stmt = stmt.where(Member.id == scope.member_id)
+
+    # All roles see all trustees/post holders (Super Admin view for everyone).
+    # Only filter by group_id when explicitly passed as a query param.
+    if group_id is not None:
+        stmt = stmt.where(member_group_filter(group_id))
     if is_current is not None:
         # A current trustee is an approved member; the rest are still pending.
         current = MemberStatus.APPROVED.value
@@ -243,12 +249,18 @@ async def list_board_seats(
     filters: dict[str, Any] = {
         k: v for k, v in {"is_current": is_current}.items() if v is not None
     }
-    if scope.unrestricted:
-        if group_id is not None:
-            filters["group_id"] = group_id
-    else:
-        # Trustees are always read group-scoped: the board belongs to a group.
-        filters["group_id"] = scope.group_id
+
+    # OLD SCOPE RESTRICTION (commented out - restored if needed):
+    # if scope.unrestricted:
+    #     if group_id is not None:
+    #         filters["group_id"] = group_id
+    # else:
+    #     # Trustees are always read group-scoped: the board belongs to a group.
+    #     filters["group_id"] = scope.group_id
+
+    # All roles see all board seats. Only filter by group_id when explicitly passed.
+    if group_id is not None:
+        filters["group_id"] = group_id
     stmt = repo.apply_filters(stmt, filters)
     total = (
         await db.execute(select(func.count()).select_from(stmt.subquery()))
