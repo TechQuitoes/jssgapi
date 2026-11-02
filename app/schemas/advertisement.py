@@ -4,14 +4,25 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SubscriptionDurationOption(BaseModel):
     months: int
     label: str
     description: str
+    price: Decimal
+    currency: str = "INR"
     is_default: bool = False
+
+
+class SubscriptionPriceUpdate(BaseModel):
+    months: int = Field(ge=1)
+    price: Decimal = Field(gt=0)
+
+
+class SubscriptionPricingUpdate(BaseModel):
+    plans: list[SubscriptionPriceUpdate] = Field(min_length=1)
 
 
 class AdvertisementCreate(BaseModel):
@@ -77,6 +88,11 @@ class AdvertisementOut(BaseModel):
     large_image_url: str | None = None
     amount: Decimal | float | None = None
     subscription_months: int | None = 1
+    subscription_plan_id: UUID | None = None
+    currency: str | None = None
+    purchased_at: datetime | None = None
+    subscription_start_date: datetime | None = None
+    subscription_expiry_date: datetime | None = None
     placement: str
     start_date: datetime | None = None
     end_date: datetime | None = None

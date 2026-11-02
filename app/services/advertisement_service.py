@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any
+from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BadRequestException
+from app.core.exceptions import BadRequestException, NotFoundException
 from app.models.advertisement import Advertisement
+from app.models.advertisement_subscription_plan import AdvertisementSubscriptionPlan
+from app.repositories.advertisement_subscription_plan_repository import (
+    AdvertisementSubscriptionPlanRepository,
+)
 from app.repositories.media_repository import MediaRepository
 from app.services.media_service import MediaService
 from app.services.media_storage import StorageBackend, get_storage
@@ -23,39 +27,6 @@ COVER_OBJECT_KEY_TEMPLATE = "advertisements/{ad_id}/cover/{unique}{suffix}"
 MAX_LARGE_IMAGE_SIZE = 5 * 1024 * 1024
 LARGE_OBJECT_KEY_TEMPLATE = "advertisements/{ad_id}/large/{unique}{suffix}"
 
-SUBSCRIPTION_DURATIONS: list[dict[str, Any]] = [
-    {
-        "months": 1,
-        "label": "1 Month",
-        "description": "After 1 month, you can renew for another 1 month.",
-        "is_default": True,
-    },
-    {
-        "months": 2,
-        "label": "2 Months",
-        "description": "2 Months advertisement subscription",
-        "is_default": False,
-    },
-    {
-        "months": 3,
-        "label": "3 Months",
-        "description": "3 Months advertisement subscription",
-        "is_default": False,
-    },
-    {
-        "months": 6,
-        "label": "6 Months",
-        "description": "6 Months advertisement subscription",
-        "is_default": False,
-    },
-    {
-        "months": 12,
-        "label": "12 Months (1 Year)",
-        "description": "1 Year advertisement subscription",
-        "is_default": False,
-    },
-]
-
 
 class AdvertisementService:
     def __init__(
@@ -65,6 +36,48 @@ class AdvertisementService:
     ):
         self.session = session
         self.storage = storage or get_storage()
+        self.plans = AdvertisementSubscriptionPlanRepository(session)
+
+    async def list_subscription_plans(
+        self, *, active_only: bool = True
+    ) -> list[AdvertisementSubscriptionPlan]:
+        return await self.plans.list_plans(active_only=active_only)
+
+    async def get_subscription_plan(self, months: int) -> AdvertisementSubscriptionPlan:
+        plan = await self.plans.get_by_months(months)
+        if plan is None or not plan.is_active:
+            raise BadRequestException(
+                "Select a valid advertisement subscription plan",
+                "INVALID_SUBSCRIPTION_PLAN",
+            )
+        return plan
+
+    async def update_subscription_prices(
+        self, updates: list[tuple[int, Decimal]]
+    ) -> list[AdvertisementSubscriptionPlan]:
+        plans: list[AdvertisementSubscriptionPlan] = []
+        seen: set[int] = set()
+        for months, price in updates:
+            if months in seen:
+                raise BadRequestException(
+                    f"Duplicate price update for {months} month(s)",
+                    "DUPLICATE_SUBSCRIPTION_PLAN",
+                )
+            seen.add(months)
+            plan = await self.plans.get_by_months(months)
+            if plan is None:
+                raise NotFoundException("Advertisement subscription plan", str(months))
+            if price <= 0:
+                raise BadRequestException(
+                    "Subscription price must be greater than zero",
+                    "INVALID_SUBSCRIPTION_PRICE",
+                )
+            plan.price = price
+            plans.append(plan)
+        await self.session.flush()
+        for plan in plans:
+            await self.session.refresh(plan)
+        return plans
 
     async def upload_cover(
         self,

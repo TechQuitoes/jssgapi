@@ -17,6 +17,7 @@ from app.core.security import hash_password
 from app.dependencies import CurrentUser, DBSession, require_permission
 from app.models.user import Role, User
 from app.repositories.group_repository import GroupRepository
+from app.repositories.member_repository import MemberRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import (
     AdminResetPasswordRequest,
@@ -81,8 +82,10 @@ async def create_user(body: UserCreate, db: DBSession):
     norm_phone = (
         normalize_phone_number(body.phone_number) if body.phone_number else None
     )
-    if norm_phone and await repo.get_by_phone(norm_phone):
-        raise AlreadyExistsException("This phone number is already registered.")
+    if norm_phone:
+        in_use, _ = await MemberRepository(db).check_phone_in_use(norm_phone)
+        if in_use:
+            raise AlreadyExistsException("This phone number is already registered.")
     role = await _resolve_role(db, body.role_name)
     user = await repo.create(
         email=body.email.strip().lower() if body.email else None,

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time, timedelta
+import calendar
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.core.constants import AdvertisementStatus, AuditAction
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import BadRequestException, NotFoundException
 from app.core.permissions import Permission
 from app.core.responses import created, ok, paginated
 from app.core.scope import assert_group_access, get_access_scope, resolve_managed_group
@@ -21,17 +22,18 @@ from app.schemas.advertisement import (
     AdvertisementOut,
     AdvertisementUpdate,
     SubscriptionDurationOption,
+    SubscriptionPricingUpdate,
 )
-from app.services.advertisement_service import (
-    SUBSCRIPTION_DURATIONS,
-    AdvertisementService,
-)
+from app.services.advertisement_service import AdvertisementService
 from app.services.audit_service import AuditService
 
 router = APIRouter(prefix="/advertisements", tags=["Advertisements"])
 
 CREATE = Depends(require_permission(Permission.ADVERTISEMENT_CREATE))
 APPROVE = Depends(require_permission(Permission.ADVERTISEMENT_APPROVE))
+PRICING_MANAGE = Depends(
+    require_permission(Permission.ADVERTISEMENT_PRICING_MANAGE)
+)
 
 
 def _now() -> datetime:
@@ -50,15 +52,86 @@ def _to_utc_datetime(val: datetime | date | None) -> datetime | None:
     return None
 
 
+def _add_months(value: datetime, months: int) -> datetime:
+    """Calendar-accurate expiry: 31 Jan + 1 month is the last day of February."""
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
+
+
+async def _resolve_subscription(
+    db: DBSession,
+    *,
+    months: int,
+    start_dt: datetime,
+    requested_amount: Decimal | float | None,
+) -> tuple[object, datetime]:
+    """Resolve the plan and validate the amount server-side.
+
+    The price always comes from the active plan row. A submitted amount is only
+    accepted when it matches that price, which catches a modal that went stale
+    after a Super Admin changed pricing without trusting the client.
+    """
+    service = AdvertisementService(db)
+    plan = await service.get_subscription_plan(months)
+    if requested_amount is not None:
+        requested = Decimal(str(requested_amount)).quantize(Decimal("0.01"))
+        expected = Decimal(str(plan.price)).quantize(Decimal("0.01"))
+        if requested != expected:
+            raise BadRequestException(
+                "Subscription price has changed. Refresh the plans and try again.",
+                "SUBSCRIPTION_PRICE_CHANGED",
+            )
+    return plan, _add_months(start_dt, plan.months)
+
+
+def _plan_out(plan) -> SubscriptionDurationOption:
+    return SubscriptionDurationOption(
+        months=plan.months,
+        label=plan.label,
+        description=plan.description
+        or f"{plan.months} month advertisement subscription",
+        price=plan.price,
+        currency=plan.currency,
+        is_default=plan.is_default,
+    )
+
+
 @router.get("/subscription-durations")
-async def get_subscription_durations():
-    """Return available advertisement subscription duration options for the dropdown."""
+async def get_subscription_durations(db: DBSession):
+    """Return active, database-backed advertisement subscription plans."""
+    plans = await AdvertisementService(db).list_subscription_plans()
     return ok(
         "Subscription duration options fetched successfully",
-        [
-            SubscriptionDurationOption.model_validate(opt)
-            for opt in SUBSCRIPTION_DURATIONS
-        ],
+        [_plan_out(plan) for plan in plans],
+    )
+
+
+@router.put("/subscription-durations", dependencies=[PRICING_MANAGE])
+async def update_subscription_durations(
+    body: SubscriptionPricingUpdate,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Update plan prices. Restricted to Super Admin by permission."""
+    service = AdvertisementService(db)
+    plans = await service.update_subscription_prices(
+        [(item.months, Decimal(str(item.price))) for item in body.plans]
+    )
+    await AuditService(db).log(
+        AuditAction.ADVERTISEMENT_PRICING_UPDATE,
+        user_id=current_user.id,
+        entity_type="advertisement_subscription_plan",
+        details={
+            "prices": {str(plan.months): str(plan.price) for plan in plans},
+        },
+    )
+    await db.flush()
+    return ok(
+        "Advertisement subscription prices updated successfully",
+        [_plan_out(plan) for plan in plans],
     )
 
 
@@ -75,12 +148,21 @@ async def list_advertisements(
 ):
     """List advertisements with optional filtering by group, placement, and status."""
     scope = await get_access_scope(db, current_user)
-    effective_group = scope.group_id if not scope.unrestricted else group_id
-
     stmt = select(Advertisement).where(Advertisement.is_deleted.is_(False))
 
-    if effective_group is not None:
-        stmt = stmt.where(Advertisement.group_id == effective_group)
+    if not scope.unrestricted:
+        user_group_id = group_id or current_user.group_id or scope.group_id
+        if user_group_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Advertisement.group_id == user_group_id,
+                    Advertisement.group_id.is_(None),
+                )
+            )
+        else:
+            stmt = stmt.where(Advertisement.group_id.is_(None))
+    elif group_id is not None:
+        stmt = stmt.where(Advertisement.group_id == group_id)
     if active_only:
         stmt = stmt.where(
             Advertisement.is_active.is_(True),
@@ -119,29 +201,35 @@ async def create_advertisement(
 ):
     """Create a new advertisement.
 
-    Fields from creation form (as shown in screenshot):
+    Fields from creation form:
     - title (Advertise Title *)
     - group_id (Post By *)
     - start_date (Start Date *)
-    - end_date (End Date *)
     - person_name (Person Name *)
     - mobile_number (Mobile Number *)
     - cover_image_url (Cover Image *)
     - large_image_url (Large Image *)
-    - amount (Advertisement Pay Amount *) - currently optional
+    - amount (optional; must match the active plan price if supplied)
     - subscription_months (Subscription duration dropdown)
+
+    The advertisement end_date is independent from the subscription expiry. It
+    is only stored when explicitly supplied; it is never derived from the plan.
     """
     effective_group_id = await resolve_managed_group(db, current_user, body.group_id)
 
     start_dt = _to_utc_datetime(body.start_date) or _now()
-    end_dt = _to_utc_datetime(body.end_date)
     months = (
         body.subscription_months
         if body.subscription_months and body.subscription_months > 0
         else 1
     )
-    if end_dt is None:
-        end_dt = start_dt + timedelta(days=30 * months)
+    plan, expiry_dt = await _resolve_subscription(
+        db,
+        months=months,
+        start_dt=start_dt,
+        requested_amount=body.amount,
+    )
+    ad_end_dt = _to_utc_datetime(body.end_date)
 
     person_name = body.person_name or current_user.full_name or "Advertiser"
     mobile_number = body.mobile_number or current_user.phone_number or ""
@@ -152,9 +240,6 @@ async def create_advertisement(
     # it defaults to APPROVED and is_active=True.
     initial_status = body.status or AdvertisementStatus.APPROVED.value
     initial_payment_status = body.payment_status or "WAIVED"
-    amount_val = (
-        Decimal(str(body.amount)) if body.amount is not None else Decimal("0.00")
-    )
 
     ad = await AdvertisementRepository(db).create(
         advertiser_id=current_user.id,
@@ -167,11 +252,16 @@ async def create_advertisement(
         media_type=body.media_type,
         cover_image_url=body.cover_image_url,
         large_image_url=body.large_image_url,
-        amount=amount_val,
-        subscription_months=months,
+        amount=plan.price,
+        subscription_months=plan.months,
+        subscription_plan_id=plan.id,
+        currency=plan.currency,
+        purchased_at=_now(),
+        subscription_start_date=start_dt,
+        subscription_expiry_date=expiry_dt,
         placement=body.placement,
         start_date=start_dt,
-        end_date=end_dt,
+        end_date=ad_end_dt,
         target_url=body.target_url,
         status=initial_status,
         is_active=body.is_active if body.is_active is not None else True,
@@ -227,20 +317,22 @@ async def create_advertisement_form(
             parsed_start = _now()
     start_dt = _to_utc_datetime(parsed_start) or _now()
 
-    parsed_end: datetime | None = None
+    months = subscription_months if subscription_months > 0 else 1
+    plan, expiry_dt = await _resolve_subscription(
+        db,
+        months=months,
+        start_dt=start_dt,
+        requested_amount=amount,
+    )
+    ad_end_dt: datetime | None = None
     if end_date:
         try:
-            parsed_end = datetime.fromisoformat(end_date)
+            ad_end_dt = _to_utc_datetime(datetime.fromisoformat(end_date))
         except ValueError:
-            parsed_end = None
-    end_dt = _to_utc_datetime(parsed_end)
-    months = subscription_months if subscription_months > 0 else 1
-    if end_dt is None:
-        end_dt = start_dt + timedelta(days=30 * months)
+            ad_end_dt = None
 
     p_name = person_name or current_user.full_name or "Advertiser"
     m_number = mobile_number or current_user.phone_number or ""
-    amount_val = amount if amount is not None else Decimal("0.00")
 
     ad = await AdvertisementRepository(db).create(
         advertiser_id=current_user.id,
@@ -251,10 +343,15 @@ async def create_advertisement_form(
         description=description,
         placement=placement,
         start_date=start_dt,
-        end_date=end_dt,
+        end_date=ad_end_dt,
         target_url=target_url,
-        amount=amount_val,
-        subscription_months=months,
+        amount=plan.price,
+        subscription_months=plan.months,
+        subscription_plan_id=plan.id,
+        currency=plan.currency,
+        purchased_at=_now(),
+        subscription_start_date=start_dt,
+        subscription_expiry_date=expiry_dt,
         status=AdvertisementStatus.APPROVED.value,
         is_active=True,
         payment_status="WAIVED",
@@ -485,8 +582,30 @@ async def update_advertisement(
         dump["start_date"] = _to_utc_datetime(dump["start_date"])
     if "end_date" in dump:
         dump["end_date"] = _to_utc_datetime(dump["end_date"])
-    if "amount" in dump and dump["amount"] is not None:
-        dump["amount"] = Decimal(str(dump["amount"]))
+    # A purchase is a historical snapshot: never let a later price change or an
+    # edit request rewrite what was actually paid. A renewal is a new purchase.
+    if "amount" in dump:
+        if dump["amount"] is not None:
+            requested = Decimal(str(dump["amount"])).quantize(Decimal("0.01"))
+            stored = Decimal(str(ad.amount or 0)).quantize(Decimal("0.01"))
+            if requested != stored:
+                raise BadRequestException(
+                    "Subscription amount is locked after purchase. "
+                    "Create a new advertisement subscription to use the latest price.",
+                    "SUBSCRIPTION_SNAPSHOT_LOCKED",
+                )
+        dump.pop("amount")
+    if "subscription_months" in dump:
+        if (
+            dump["subscription_months"] is not None
+            and dump["subscription_months"] != ad.subscription_months
+        ):
+            raise BadRequestException(
+                "Subscription duration is locked after purchase. "
+                "Create a new advertisement subscription to change duration.",
+                "SUBSCRIPTION_SNAPSHOT_LOCKED",
+            )
+        dump.pop("subscription_months")
 
     ad = await repo.update(ad, **dump)
     await AuditService(db).log(

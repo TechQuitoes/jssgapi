@@ -278,6 +278,40 @@ async def list_members(
 @router.post("", dependencies=[CREATE])
 async def create_member(body: MemberCreate, current_user: CurrentUser, db: DBSession):
     repo = MemberRepository(db)
+    norm_phone = normalize_phone_number(body.phone_number)
+    in_use, _ = await repo.check_phone_in_use(norm_phone, exclude_user_id=body.user_id)
+    if in_use:
+        raise AlreadyExistsException(
+            "This phone number is already registered or in use by another member."
+        )
+
+    if body.spouse_mobile and body.spouse_mobile.strip():
+        norm_spouse = normalize_phone_number(body.spouse_mobile.strip())
+        if norm_spouse == norm_phone:
+            raise AlreadyExistsException(
+                "Member mobile and spouse mobile cannot be the same number."
+            )
+        spouse_in_use, _ = await repo.check_phone_in_use(
+            norm_spouse, exclude_user_id=body.user_id
+        )
+        if spouse_in_use:
+            raise AlreadyExistsException(
+                "Spouse mobile number is already registered or in use "
+                "by another member."
+            )
+
+    if body.contact_phone and body.contact_phone.strip():
+        norm_contact = normalize_phone_number(body.contact_phone.strip())
+        if norm_contact != norm_phone:
+            contact_in_use, _ = await repo.check_phone_in_use(
+                norm_contact, exclude_user_id=body.user_id
+            )
+            if contact_in_use:
+                raise AlreadyExistsException(
+                    "Contact phone number is already registered or in use "
+                    "by another member."
+                )
+
     # Only enforced when the admin links an account; imported community members
     # legitimately have no User at all.
     if body.user_id is not None:

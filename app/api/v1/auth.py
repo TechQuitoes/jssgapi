@@ -101,6 +101,7 @@ async def register(body: RegisterRequest, request: Request, db: DBSession):
         email=body.email,
         password=body.password,
         phone_number=body.phone_number,
+        spouse_mobile=body.spouse_mobile,
         group_id=body.group_id,
         group_name=body.group_name,
         ip_address=ip,

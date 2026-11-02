@@ -4,6 +4,7 @@ import hashlib
 import hmac as hmac_module
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -30,6 +31,7 @@ from app.core.security import (
 from app.integrations.firebase import verify_id_token as firebase_verify_id_token
 from app.integrations.msg91 import send_otp as msg91_send_otp
 from app.integrations.sms import is_dev_sms, send_otp
+from app.models.family import FamilyMember
 from app.models.group import SocialGroup
 from app.models.member_group import MemberGroupMembership
 from app.models.otp_code import OtpCode
@@ -68,9 +70,10 @@ class AuthService:
         stores it. Returns MSG91's ``req_id``.
         """
         normalized = normalize_phone_number(phone)
-        if await self.users.get_by_phone(normalized):
+        in_use, _ = await self.members.check_phone_in_use(normalized)
+        if in_use:
             raise AlreadyExistsException(
-                "This phone number is already registered."
+                "This phone number is already registered or in use by another member."
             )
 
         req_id = await msg91_send_otp(normalized)
@@ -91,6 +94,7 @@ class AuthService:
         email: str | None,
         password: str,
         phone_number: str,
+        spouse_mobile: str | None = None,
         group_id: UUID | None = None,
         group_name: str | None = None,
         ip_address: str | None = None,
@@ -104,11 +108,26 @@ class AuthService:
 
         verified_phone = normalize_phone_number(phone_number)
 
-        existing = await self.users.get_by_phone(verified_phone)
-        if existing is not None:
+        phone_in_use, _ = await self.members.check_phone_in_use(verified_phone)
+        if phone_in_use:
             raise AlreadyExistsException(
-                "This phone number is already registered."
+                "This phone number is already registered or in use by another member."
             )
+
+        norm_spouse_phone: str | None = None
+        if spouse_mobile and spouse_mobile.strip():
+            norm_spouse_phone = normalize_phone_number(spouse_mobile.strip())
+            if norm_spouse_phone == verified_phone:
+                raise AlreadyExistsException(
+                    "Member mobile and spouse mobile cannot be the same number."
+                )
+            spouse_in_use, _ = await self.members.check_phone_in_use(
+                norm_spouse_phone
+            )
+            if spouse_in_use:
+                raise AlreadyExistsException(
+                    "Spouse mobile number is already registered or in use by another member."
+                )
 
         if email and await self.users.get_by_email(email):
             raise AlreadyExistsException("This email is already registered.")
@@ -163,6 +182,8 @@ class AuthService:
             "full_name": full_name,
             "phone": verified_phone,
         }
+        if norm_spouse_phone:
+            profile_data["spouse_mobile"] = norm_spouse_phone
         if selected_group_name:
             profile_data["social_group_name"] = selected_group_name
         if email:
@@ -178,6 +199,15 @@ class AuthService:
             membership_status=MemberStatus.PENDING.value,
             profile_data=profile_data,
         )
+
+        if norm_spouse_phone:
+            spouse_member = FamilyMember(
+                member_id=member.id,
+                name="Spouse",
+                relationship_type="spouse",
+                contact_phone=norm_spouse_phone,
+            )
+            self.session.add(spouse_member)
 
         if selected_group is not None:
             membership = MemberGroupMembership(
@@ -236,10 +266,19 @@ class AuthService:
         *,
         ip_address: str | None,
         user_agent: str | None,
+        verified_phone: str | None = None,
     ) -> dict:
         user.is_phone_verified = True
         user.last_login_at = datetime.now(UTC)
-        if firebase_uid and not user.firebase_uid:
+        is_primary = True
+        if verified_phone:
+            try:
+                norm_v = normalize_phone_number(verified_phone)
+                norm_u = normalize_phone_number(user.phone_number)
+                is_primary = norm_v == norm_u
+            except Exception:
+                pass
+        if is_primary and firebase_uid and not user.firebase_uid:
             user.firebase_uid = firebase_uid
         await self.audit.log(
             AuditAction.LOGIN,
@@ -256,6 +295,10 @@ class AuthService:
         user = await self.users.get_by_phone(local_phone)
         if user is None and local_phone != normalized:
             user = await self.users.get_by_phone(normalized)
+        if user is None:
+            member = await self.members.get_by_spouse_phone(phone)
+            if member is not None and member.user_id:
+                user = await self.users.get_by_id(member.user_id)
         return user
 
     async def _resolve_registration_role(self, role: str | None) -> Role:
@@ -306,6 +349,7 @@ class AuthService:
                 firebase_uid,
                 ip_address=ip_address,
                 user_agent=user_agent,
+                verified_phone=str(verified_phone),
             )
 
         if not email and not phone_number:
@@ -363,6 +407,7 @@ class AuthService:
             firebase_uid,
             ip_address=ip_address,
             user_agent=user_agent,
+            verified_phone=str(verified_phone),
         )
 
     async def oauth2_admin_token(
@@ -413,7 +458,7 @@ class AuthService:
         user_agent: str | None = None,
     ) -> dict:
         normalized = normalize_phone_number(phone)
-        user = await self.users.get_by_phone(normalized)
+        user = await self._get_user_by_phone_forms(normalized)
         if user is None:
             raise NotFoundException(
                 "Account not found for this phone number. Please register first."

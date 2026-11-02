@@ -86,6 +86,7 @@ class Permission:
     ADVERTISEMENT_READ = "advertisement.read"
     ADVERTISEMENT_CREATE = "advertisement.create"
     ADVERTISEMENT_APPROVE = "advertisement.approve"
+    ADVERTISEMENT_PRICING_MANAGE = "advertisement.pricing_manage"
 
     MEDIA_READ = "media.read"
     MEDIA_UPLOAD = "media.upload"
@@ -145,6 +146,7 @@ ROLE_PERMISSIONS: dict[RoleName, set[str]] = {
         Permission.ADVERTISEMENT_READ,
         Permission.ADVERTISEMENT_CREATE,
         Permission.ADVERTISEMENT_APPROVE,
+        Permission.ADVERTISEMENT_PRICING_MANAGE,
         Permission.MEDIA_READ,
         Permission.MEDIA_UPLOAD,
         Permission.MEDIA_DELETE,

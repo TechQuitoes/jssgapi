@@ -13,6 +13,7 @@ from app.core.constants import AdvertisementStatus
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from app.models.advertisement_subscription_plan import AdvertisementSubscriptionPlan
     from app.models.group import SocialGroup
     from app.models.user import User
 
@@ -39,6 +40,25 @@ class Advertisement(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     )
     subscription_months: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=1
+    )
+    subscription_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "advertisement_subscription_plans.id",
+            name="fk_advertisements_subscription_plan_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, default="INR")
+    purchased_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    subscription_start_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    subscription_expiry_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     placement: Mapped[str] = mapped_column(
         String(50), nullable=False, default="HOME_BANNER"
@@ -83,6 +103,9 @@ class Advertisement(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
 
     advertiser: Mapped[User | None] = relationship()
     group: Mapped[SocialGroup | None] = relationship(lazy="selectin")
+    subscription_plan: Mapped[AdvertisementSubscriptionPlan | None] = relationship(
+        lazy="selectin"
+    )
 
     @property
     def group_name(self) -> str | None:

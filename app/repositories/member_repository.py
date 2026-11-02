@@ -449,6 +449,118 @@ class MemberRepository(BaseRepository[Member]):
         )
         return result.scalars().first()
 
+    @staticmethod
+    def _phone_candidates(phone: str) -> list[str]:
+        raw = phone.strip().replace(" ", "").replace("-", "")
+        local = raw.removeprefix("+91")
+        if local.startswith("0") and len(local) > 10:
+            local = local[1:]
+        if len(local) == 10 and local.isdigit():
+            with_prefix = f"+91{local}"
+            return list({raw, local, with_prefix})
+        return list({raw, local})
+
+    async def get_by_spouse_phone(self, phone: str) -> Member | None:
+        candidates = self._phone_candidates(phone)
+        spouse_rel_types = ["spouse", "wife", "husband"]
+        spouse_phone_match = (
+            select(FamilyMember.id)
+            .where(
+                FamilyMember.member_id == Member.id,
+                func.lower(FamilyMember.relationship_type).in_(spouse_rel_types),
+                func.trim(FamilyMember.contact_phone).in_(candidates),
+            )
+            .exists()
+        )
+
+        conditions = [
+            func.trim(Member.profile_data["spouse_mobile"].astext).in_(candidates),
+            spouse_phone_match,
+        ]
+
+        stmt = select(Member).where(
+            Member.is_deleted.is_(False),
+            or_(*conditions),
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().first()
+
+    async def check_phone_in_use(
+        self,
+        phone: str,
+        *,
+        exclude_member_id: UUID | None = None,
+        exclude_user_id: UUID | None = None,
+    ) -> tuple[bool, str | None]:
+        """Check if a phone number exists as a member mobile or spouse mobile in DB.
+
+        Returns (True, "member_phone") if matched on user or member primary phone,
+        (True, "spouse_phone") if matched on member or family spouse phone,
+        or (False, None) if not present.
+        """
+        candidates = self._phone_candidates(phone)
+
+        # 1. Check users table
+        user_stmt = select(User.id).where(
+            func.trim(User.phone_number).in_(candidates)
+        )
+        if exclude_user_id is not None:
+            user_stmt = user_stmt.where(User.id != exclude_user_id)
+        user_res = (await self.session.execute(user_stmt)).scalars().first()
+        if user_res is not None:
+            return True, "member_phone"
+
+        # 2. Check members table primary mobile
+        member_conditions = [
+            func.trim(Member.contact_phone).in_(candidates),
+            func.trim(Member.profile_data["phone"].astext).in_(candidates),
+            func.trim(Member.profile_data["mobile_number"].astext).in_(candidates),
+        ]
+        member_stmt = select(Member.id).where(
+            Member.is_deleted.is_(False),
+            or_(*member_conditions),
+        )
+        if exclude_member_id is not None:
+            member_stmt = member_stmt.where(Member.id != exclude_member_id)
+        if exclude_user_id is not None:
+            member_stmt = member_stmt.where(
+                or_(Member.user_id != exclude_user_id, Member.user_id.is_(None))
+            )
+        member_res = (await self.session.execute(member_stmt)).scalars().first()
+        if member_res is not None:
+            return True, "member_phone"
+
+        # 3. Check spouse mobile in members.profile_data or family_members
+        spouse_rel_types = ["spouse", "wife", "husband"]
+        spouse_fam_match = (
+            select(FamilyMember.id)
+            .where(
+                FamilyMember.member_id == Member.id,
+                func.lower(FamilyMember.relationship_type).in_(spouse_rel_types),
+                func.trim(FamilyMember.contact_phone).in_(candidates),
+            )
+            .exists()
+        )
+        spouse_conditions = [
+            func.trim(Member.profile_data["spouse_mobile"].astext).in_(candidates),
+            spouse_fam_match,
+        ]
+        spouse_stmt = select(Member.id).where(
+            Member.is_deleted.is_(False),
+            or_(*spouse_conditions),
+        )
+        if exclude_member_id is not None:
+            spouse_stmt = spouse_stmt.where(Member.id != exclude_member_id)
+        if exclude_user_id is not None:
+            spouse_stmt = spouse_stmt.where(
+                or_(Member.user_id != exclude_user_id, Member.user_id.is_(None))
+            )
+        spouse_res = (await self.session.execute(spouse_stmt)).scalars().first()
+        if spouse_res is not None:
+            return True, "spouse_phone"
+
+        return False, None
+
     async def list_by_group(
         self, group_id, limit: int = 100, offset: int = 0
     ) -> list[Member]:

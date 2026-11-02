@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
 from uuid import UUID
 
 from pydantic import (
@@ -33,11 +32,26 @@ class RegisterRequest(BaseModel):
     confirm_password: str = Field(min_length=8, max_length=128)
     group_id: UUID | None = None
     group_name: str | None = None
+    spouse_mobile: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("spouse_mobile", "spouse_phone"),
+    )
     id_token: str | None = None
 
     @field_validator("email", mode="before")
     @classmethod
     def _normalize_email(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+        return value
+
+    @field_validator("spouse_mobile", mode="before")
+    @classmethod
+    def _normalize_spouse_mobile(cls, value: object) -> object:
         if value is None:
             return None
         if isinstance(value, str):
@@ -65,6 +79,15 @@ class RegisterRequest(BaseModel):
             raise ValueError("Invalid email address")
         if self.password != self.confirm_password:
             raise ValueError("Passwords do not match")
+        if self.spouse_mobile is not None:
+            if not validate_phone(self.spouse_mobile):
+                raise ValueError("Invalid spouse phone number")
+            norm_p = self.phone_number.strip().removeprefix("+91")
+            norm_s = self.spouse_mobile.strip().removeprefix("+91")
+            if norm_p == norm_s:
+                raise ValueError(
+                    "Member mobile and spouse mobile cannot be the same number"
+                )
         return self
 
 

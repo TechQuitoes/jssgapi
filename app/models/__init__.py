@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from app.models.advertisement import Advertisement  # noqa: F401
+from app.models.advertisement_subscription_plan import (  # noqa: F401
+    AdvertisementSubscriptionPlan,
+)
 from app.models.audit_log import AuditLog  # noqa: F401
 from app.models.base import Base  # noqa: F401
 from app.models.event import Event  # noqa: F401
