@@ -12,7 +12,7 @@ from app.core.constants import AdvertisementStatus, AuditAction
 from app.core.exceptions import BadRequestException, NotFoundException
 from app.core.permissions import Permission
 from app.core.responses import created, ok, paginated
-from app.core.scope import assert_group_access, get_access_scope, resolve_managed_group
+from app.core.scope import assert_group_access, resolve_managed_group
 from app.dependencies import CurrentUser, DBSession, require_permission
 from app.models.advertisement import Advertisement
 from app.repositories.advertisement_repository import AdvertisementRepository
@@ -146,23 +146,21 @@ async def list_advertisements(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
-    """List advertisements with optional filtering by group, placement, and status."""
-    scope = await get_access_scope(db, current_user)
+    """List advertisements with optional filtering by group, placement, and status.
+
+    Advertisements are home screen promotional banners visible to Super Admin,
+    Group Admin, and Member alike. When group_id is not specified, all
+    advertisements are returned regardless of the user's role or group.
+    """
     stmt = select(Advertisement).where(Advertisement.is_deleted.is_(False))
 
-    if not scope.unrestricted:
-        user_group_id = group_id or current_user.group_id or scope.group_id
-        if user_group_id is not None:
-            stmt = stmt.where(
-                or_(
-                    Advertisement.group_id == user_group_id,
-                    Advertisement.group_id.is_(None),
-                )
+    if group_id is not None:
+        stmt = stmt.where(
+            or_(
+                Advertisement.group_id == group_id,
+                Advertisement.group_id.is_(None),
             )
-        else:
-            stmt = stmt.where(Advertisement.group_id.is_(None))
-    elif group_id is not None:
-        stmt = stmt.where(Advertisement.group_id == group_id)
+        )
     if active_only:
         stmt = stmt.where(
             Advertisement.is_active.is_(True),

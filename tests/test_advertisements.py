@@ -368,12 +368,10 @@ async def test_list_and_update_and_delete_advertisement(client, seed_data):
 
 
 @pytest.mark.asyncio
-async def test_list_advertisements_includes_global_and_own_group_for_scoped_users(
+async def test_list_advertisements_visible_to_group_admin_and_member(
     client, seed_data
 ):
-    """Group Admin and Members see their group's ads plus global ads
-    (group_id IS NULL).
-    """
+    """Group Admin and Members see promotional banners just like Super Admin."""
     seed = await seed_data
     root_token = seed["root_token"]
     admin_a_token = seed["admin_a_token"]
@@ -405,7 +403,7 @@ async def test_list_advertisements_includes_global_and_own_group_for_scoped_user
     assert group_b_res.status_code == 201
     group_b_ad_id = group_b_res.json()["data"]["id"]
 
-    # 4. Group Admin A lists advertisements
+    # 4. Group Admin A lists advertisements without group_id filter
     list_res = client.get(
         "/api/v1/advertisements",
         headers=_auth(admin_a_token),
@@ -413,8 +411,19 @@ async def test_list_advertisements_includes_global_and_own_group_for_scoped_user
     assert list_res.status_code == 200
     item_ids = [item["id"] for item in list_res.json()["data"]]
 
-    # Must see their own group's ad AND the global ad
+    # Sees promotional banners on home screen just like Super Admin
     assert group_a_ad_id in item_ids
     assert global_ad_id in item_ids
-    # Must NOT see Group B's ad
-    assert group_b_ad_id not in item_ids
+    assert group_b_ad_id in item_ids
+
+    # 5. When group_id is explicitly passed, it filters to that group (+ global)
+    filtered_res = client.get(
+        "/api/v1/advertisements",
+        headers=_auth(admin_a_token),
+        params={"group_id": str(seed["group_a_id"])},
+    )
+    assert filtered_res.status_code == 200
+    filtered_ids = [item["id"] for item in filtered_res.json()["data"]]
+    assert group_a_ad_id in filtered_ids
+    assert global_ad_id in filtered_ids
+    assert group_b_ad_id not in filtered_ids
