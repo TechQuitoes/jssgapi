@@ -67,6 +67,14 @@ async def get_access_scope(db: AsyncSession, user: User) -> AccessScope:
 
     result = await db.execute(select(Member).where(Member.user_id == user.id))
     member = result.scalar_one_or_none()
+    if member is None and user.phone_number:
+        phone_result = await db.execute(
+            select(Member).where(
+                Member.contact_phone == user.phone_number,
+                Member.is_deleted.is_(False),
+            )
+        )
+        member = phone_result.scalars().first()
     group_id = user.group_id or (member.group_id if member is not None else None)
 
     if role in SCOPED_ROLES:
@@ -112,6 +120,14 @@ async def get_admin_scope(db: AsyncSession, user: User) -> UUID | None:
         return user.group_id
     result = await db.execute(select(Member).where(Member.user_id == user.id))
     member = result.scalar_one_or_none()
+    if member is None and user.phone_number:
+        phone_result = await db.execute(
+            select(Member).where(
+                Member.contact_phone == user.phone_number,
+                Member.is_deleted.is_(False),
+            )
+        )
+        member = phone_result.scalars().first()
     if member is None or member.group_id is None:
         raise ForbiddenException("Your account is not associated with a group")
     user._cached_admin_scope = member.group_id

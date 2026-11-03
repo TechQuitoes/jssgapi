@@ -32,9 +32,12 @@ from app.dependencies import (
     get_current_user,
     require_permission,
 )
+from sqlalchemy import select
 from app.models.event import Event
 from app.models.event_group import EventGroup
 from app.models.group import SocialGroup
+from app.models.member import Member
+from app.models.member_group import GroupMember
 from app.models.user import User
 from app.repositories.event_repository import EventRepository
 from app.schemas.event import (
@@ -108,13 +111,36 @@ class ReadScope:
 
 
 async def _effective_member_group_ids(
-    db: DBSession, primary_group_id: UUID | None, member_id: UUID | None
+    db: DBSession,
+    primary_group_id: UUID | None,
+    member_id: UUID | None,
+    current_user: User | None = None,
 ) -> set[UUID]:
     effective: set[UUID] = set()
     if primary_group_id is not None:
         effective.add(primary_group_id)
+    if current_user is not None and current_user.group_id is not None:
+        effective.add(current_user.group_id)
     if member_id is not None:
         effective.update(await member_group_ids(db, member_id))
+    if current_user is not None:
+        gm_result = await db.execute(
+            select(GroupMember.group_id).where(GroupMember.user_id == current_user.id)
+        )
+        for gid in gm_result.scalars().all():
+            effective.add(gid)
+        if member_id is None and current_user.phone_number:
+            res = await db.execute(
+                select(Member).where(
+                    Member.contact_phone == current_user.phone_number,
+                    Member.is_deleted.is_(False),
+                )
+            )
+            m = res.scalars().first()
+            if m is not None:
+                if m.group_id is not None:
+                    effective.add(m.group_id)
+                effective.update(await member_group_ids(db, m.id))
     return effective
 
 
@@ -125,9 +151,9 @@ async def _read_scope(
 
     Super Admins always see every live event, including legacy events with no
     group mapping; ``requested_group_id`` never narrows their listing. Group
-    Admins are limited to their own group. Members see events for every group
-    they belong to, and only public events. Scoped roles never see an event that
-    has no group assignment.
+    Admins are limited to their own group plus all-group (null) events. Members
+    see events for every group they belong to, plus all-group (null) events,
+    and only public events.
     """
     access = await get_access_scope(db, current_user)
     role = _role_of(current_user)
@@ -137,22 +163,33 @@ async def _read_scope(
 
     if role is RoleName.GROUP_ADMIN:
         if access.group_id is None:
-            return ReadScope(group_ids=set(), include_ungrouped=False)
+            return ReadScope(group_ids=set(), include_ungrouped=True)
         if requested_group_id is not None and requested_group_id != access.group_id:
             raise ForbiddenException("Operation is limited to your own group")
-        return ReadScope(group_ids={access.group_id}, include_ungrouped=False)
+        include_ungrouped = requested_group_id is None
+        return ReadScope(
+            group_ids={access.group_id},
+            include_ungrouped=include_ungrouped,
+        )
 
     if role is RoleName.MEMBER:
         effective = await _effective_member_group_ids(
-            db, access.group_id, access.member_id
+            db, access.group_id, access.member_id, current_user
         )
         if requested_group_id is not None:
             if requested_group_id not in effective:
                 raise ForbiddenException("Operation is limited to your groups")
             effective = {requested_group_id}
-        return ReadScope(group_ids=effective, include_ungrouped=False, public_only=True)
+            include_ungrouped = False
+        else:
+            include_ungrouped = True
+        return ReadScope(
+            group_ids=effective,
+            include_ungrouped=include_ungrouped,
+            public_only=True,
+        )
 
-    return ReadScope(group_ids=set(), include_ungrouped=False, public_only=True)
+    return ReadScope(group_ids=set(), include_ungrouped=True, public_only=True)
 
 
 async def _resolve_event_group_ids(
@@ -167,10 +204,13 @@ async def _resolve_event_group_ids(
     if not requested_group_ids:
         if creating and scope is not None:
             requested_group_ids = [scope]
-        else:
+        elif scope is not None:
             raise BadRequestException(
                 "An event must be associated with at least one group"
             )
+        else:
+            # Super Admin can create or update an event with no groups for platform-wide / All Groups
+            return []
     if scope is not None and any(group_id != scope for group_id in requested_group_ids):
         raise ForbiddenException("Operation is limited to your own group")
 
@@ -237,6 +277,12 @@ async def _get_visible_event(
 
     event_group_ids = set(event.group_ids)
 
+    # An event with no group mapping (All Groups / null group_id) is visible to everyone
+    if event.group_id is None or not event_group_ids:
+        if role is RoleName.MEMBER and not event.is_public:
+            raise NotFoundException("Event", str(event_id))
+        return event
+
     if role is RoleName.GROUP_ADMIN:
         if access.group_id in event_group_ids:
             return event
@@ -246,7 +292,7 @@ async def _get_visible_event(
         if not event.is_public:
             raise NotFoundException("Event", str(event_id))
         effective = await _effective_member_group_ids(
-            db, access.group_id, access.member_id
+            db, access.group_id, access.member_id, current_user
         )
         if event_group_ids & effective:
             return event
@@ -413,7 +459,7 @@ async def create_event(body: EventCreate, current_user: CurrentUser, db: DBSessi
     )
     data = body.model_dump()
     data.pop("group_ids", None)
-    data["group_id"] = group_ids[0]
+    data["group_id"] = group_ids[0] if group_ids else None
     data["event_type"] = body.event_type.value
     data["status"] = body.status.value
 
@@ -467,7 +513,8 @@ async def update_event(
     data.pop("group_ids", None)
     data.pop("group_id", None)
     if group_ids is not None:
-        data["group_id"] = group_ids[0]
+        data["group_id"] = group_ids[0] if group_ids else None
+        event.group_id = data["group_id"]
     if body.event_type is not None:
         data["event_type"] = body.event_type.value
     for key, value in data.items():

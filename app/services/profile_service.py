@@ -418,11 +418,13 @@ class ProfileService:
             grp = m.group
             if grp is not None and getattr(grp, "is_deleted", False):
                 continue
-            gid = (grp.group_id if grp and grp.group_id else None) or str(m.group_id)
+            gid = str(m.group_id)
+            gcode = grp.group_id if grp and grp.group_id else None
             gname = (grp.name if grp else None) or m.group_name or ""
             mnum = m.membership_number or (member.membership_number if m.is_primary else None)
             item = {
                 "group_id": gid,
+                "group_code": gcode,
                 "group_name": gname,
                 "membership_number": mnum,
                 "is_primary": m.is_primary,
@@ -431,22 +433,26 @@ class ProfileService:
             if m.is_primary and not primary_info:
                 primary_info = {
                     "group_id": gid,
+                    "group_code": gcode,
                     "group_name": gname,
                     "membership_number": mnum,
                 }
 
         if not groups and member.group and not getattr(member.group, "is_deleted", False):
-            gid = member.group.group_id or str(member.group.id)
+            gid = str(member.group.id)
+            gcode = member.group.group_id
             gname = member.group.name
             mnum = member.membership_number
             groups.append({
                 "group_id": gid,
+                "group_code": gcode,
                 "group_name": gname,
                 "membership_number": mnum,
                 "is_primary": True,
             })
             primary_info = {
                 "group_id": gid,
+                "group_code": gcode,
                 "group_name": gname,
                 "membership_number": mnum,
             }

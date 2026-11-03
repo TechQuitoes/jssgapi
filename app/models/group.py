@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, and_, func, select
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, and_, func, not_, select
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, foreign, mapped_column, relationship
 
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 
 def _admin_join_condition():
+    from app.models.member import Member
     from app.models.user import Role, User
 
     return and_(
@@ -27,6 +28,14 @@ def _admin_join_condition():
         == select(Role.id)
         .where(func.upper(func.trim(Role.name)) == "GROUP_ADMIN")
         .scalar_subquery(),
+        not_(
+            select(Member.id)
+            .where(
+                Member.user_id == User.id,
+                Member.is_deleted.is_(True),
+            )
+            .exists()
+        ),
     )
 
 

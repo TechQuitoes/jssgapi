@@ -182,6 +182,8 @@ class GroupMemberOut(BaseModel):
     email: str | None = None
     membership_number: str | None = None
     is_primary: bool = False
+    role: str = "MEMBER"
+    role_name: str | None = None
     membership_status: str
     status: str | None = None
     group_id: UUID | None = None

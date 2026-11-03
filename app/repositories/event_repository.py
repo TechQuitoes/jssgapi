@@ -49,10 +49,8 @@ class EventRepository(BaseRepository[Event]):
                 Event.event_groups.any(EventGroup.group_id.in_(group_ids)),
             )
             if include_ungrouped:
-                # A legacy event with no group at all stays platform-wide. An
-                # event whose primary group was deleted but still has another
-                # selected group is grouped, not ungrouped.
-                ungrouped = and_(Event.group_id.is_(None), ~Event.event_groups.any())
+                # An all-groups event has group_id IS NULL (or no group selection).
+                ungrouped = or_(Event.group_id.is_(None), ~Event.event_groups.any())
                 clauses.append(or_(group_match, ungrouped))
             else:
                 clauses.append(group_match)

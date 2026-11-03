@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from app.core.constants import AuditAction, MemberStatus, RoleName, resolve_role_name
 from app.core.exceptions import (
@@ -392,7 +393,7 @@ async def list_group_members(
 
     stmt = select(Member).where(
         member_group_filter(group_id), Member.is_deleted.is_(False)
-    ).options(*MEMBER_PROFILE_LOADS)
+    ).options(*MEMBER_PROFILE_LOADS, selectinload(Member.user).selectinload(User.role))
     if status is not None:
         stmt = stmt.where(Member.membership_status == status)
 
@@ -502,6 +503,10 @@ def _group_member_out(
             "joined_at": member.joined_at,
         })
 
+    role_name = "MEMBER"
+    if member.user is not None and getattr(member.user, "role", None) is not None:
+        role_name = member.user.role.name
+
     return GroupMemberOut(
         id=member.id,
         member_id=member.id,
@@ -509,6 +514,8 @@ def _group_member_out(
         full_name=full_name,
         first_name=member.first_name,
         last_name=member.last_name,
+        role=role_name,
+        role_name=role_name,
         phone_number=member.contact_phone,
         email=member.contact_email,
         membership_number=membership_number,

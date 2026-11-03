@@ -100,6 +100,7 @@ class ProfileUpdate(BaseModel):
 
 class ProfileGroupItem(BaseModel):
     group_id: str | None = None
+    group_code: str | None = None
     group_name: str | None = None
     membership_number: str | None = None
     is_primary: bool = False

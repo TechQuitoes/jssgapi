@@ -365,17 +365,20 @@ def format_group_id(prefix: str, sequence: int) -> str:
 
 
 async def get_group_member_count(session: AsyncSession, group_uuid: UUID) -> int:
-    result = await session.execute(
-        select(func.count(GroupMember.id)).where(GroupMember.group_id == group_uuid)
-    )
-    count = result.scalar() or 0
-    if count == 0:
-        result_mem = await session.execute(
-            select(func.count(MemberGroupMembership.id)).where(
-                MemberGroupMembership.group_id == group_uuid
-            )
+    result_mem = await session.execute(
+        select(func.count(MemberGroupMembership.id))
+        .join(Member, Member.id == MemberGroupMembership.member_id)
+        .where(
+            MemberGroupMembership.group_id == group_uuid,
+            Member.is_deleted.is_(False),
         )
-        count = result_mem.scalar() or 0
+    )
+    count = result_mem.scalar() or 0
+    if count == 0:
+        result = await session.execute(
+            select(func.count(GroupMember.id)).where(GroupMember.group_id == group_uuid)
+        )
+        count = result.scalar() or 0
     return int(count)
 
 

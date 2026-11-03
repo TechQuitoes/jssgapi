@@ -72,8 +72,11 @@ def _member_out(member: Member) -> MemberOut:
     if group is not None and group.is_deleted:
         group = None
     out.group_name = group.name if group else None
-    if group and group.group_id:
-        out.group_id = group.group_id
+    if group:
+        out.group_id = group.id
+        out.group_code = group.group_id
+    elif member.group_id:
+        out.group_id = member.group_id
     raw_profile_group = (
         (member.profile_data or {}).get("social_group_association_name")
         or (member.profile_data or {}).get("social_group_name")
@@ -808,6 +811,18 @@ async def delete_member(member_id: UUID, current_user: CurrentUser, db: DBSessio
     # Soft delete first: if object storage cannot be reached, the member is
     # still gone from the API and only an orphan object is left behind.
     await repo.delete(member)
+    await memberships.detach_member(db, member)
+    if member.user_id:
+        user = await UserRepository(db).get_by_id(member.user_id)
+        if user:
+            user.group_id = None
+            res = await db.execute(select(Role).where(Role.name == RoleName.MEMBER.value))
+            member_role = res.scalar_one_or_none()
+            if member_role and user.role_id != member_role.id:
+                ga_res = await db.execute(select(Role).where(Role.name == RoleName.GROUP_ADMIN.value))
+                ga_role = ga_res.scalar_one_or_none()
+                if ga_role and user.role_id == ga_role.id:
+                    user.role_id = member_role.id
     await MemberPhotoService(db).remove_all(member)
     await db.flush()
     return ok("Member deleted successfully")

@@ -15,6 +15,7 @@ from app.core.permissions import Permission
 from app.core.responses import created, ok, paginated
 from app.core.security import hash_password
 from app.dependencies import CurrentUser, DBSession, require_permission
+from app.models.member_group import GroupMember
 from app.models.user import Role, User
 from app.repositories.group_repository import GroupRepository
 from app.repositories.member_repository import MemberRepository
@@ -27,6 +28,7 @@ from app.schemas.user import (
     UserOut,
     UserUpdate,
 )
+from app.services import member_group_service as memberships
 from app.services.audit_service import AuditService
 from app.utils.validators import normalize_phone_number
 
@@ -172,9 +174,34 @@ async def change_user_role(
         if group is None:
             raise NotFoundException("Group", str(body.group_id))
         user.group_id = group.id
+
+        # Sync linked Member to the group so the member appears in the group
+        member = await MemberRepository(db).get_by_user_id(user.id)
+        if member is not None and not member.is_deleted:
+            await memberships.add_membership(db, member, group)
+            member.group_id = group.id
+
+        existing_gm = (await db.execute(
+            select(GroupMember).where(
+                GroupMember.user_id == user.id,
+                GroupMember.group_id == group.id,
+            )
+        )).scalar_one_or_none()
+        if existing_gm:
+            existing_gm.role = RoleName.GROUP_ADMIN.value
     else:
         # A role with no group (MEMBER, SUPER_ADMIN) must not keep a stale scope.
+        old_group_id = user.group_id
         user.group_id = None
+        if old_group_id:
+            existing_gm = (await db.execute(
+                select(GroupMember).where(
+                    GroupMember.user_id == user.id,
+                    GroupMember.group_id == old_group_id,
+                )
+            )).scalar_one_or_none()
+            if existing_gm:
+                existing_gm.role = RoleName.MEMBER.value
 
     if user.id == current_user.id and role.name != RoleName.SUPER_ADMIN.value:
         raise BadRequestException("You cannot remove your own administrator role")

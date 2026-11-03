@@ -235,3 +235,16 @@ async def detach_group(db: AsyncSession, group_id: UUID) -> None:
         member = await db.get(Member, member_id)
         if member is not None:
             await remove_membership(db, member, group_id)
+
+
+async def detach_member(db: AsyncSession, member: Member) -> None:
+    """Remove all group memberships when a member is deleted."""
+    await db.execute(
+        delete(MemberGroupMembership).where(MemberGroupMembership.member_id == member.id)
+    )
+    if member.user_id:
+        await db.execute(
+            delete(GroupMember).where(GroupMember.user_id == member.user_id)
+        )
+    member.group_id = None
+
