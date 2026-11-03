@@ -7,6 +7,7 @@ from app.models.advertisement_subscription_plan import (  # noqa: F401
 from app.models.audit_log import AuditLog  # noqa: F401
 from app.models.base import Base  # noqa: F401
 from app.models.event import Event  # noqa: F401
+from app.models.event_group import EventGroup  # noqa: F401
 from app.models.event_image import EventImage  # noqa: F401
 from app.models.family import FamilyMember  # noqa: F401
 from app.models.fee import Fee  # noqa: F401

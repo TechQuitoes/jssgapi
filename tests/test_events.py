@@ -20,6 +20,7 @@ from app.config import get_settings
 from app.core.constants import EventTimeFrame
 from app.core.security import hash_password
 from app.main import app
+from app.models.event import Event
 from app.models.event_image import EventImage
 from app.models.group import SocialGroup
 from app.models.media import Media, MediaObject
@@ -104,27 +105,33 @@ def engine():
 
 @pytest.fixture(scope="module")
 def world(client, engine):
-    """Two groups, each with an admin, plus a member and a platform admin."""
+    """Three groups, each with an admin, plus a platform admin."""
     group_a = _create_group(engine, f"Event Group A {uuid.uuid4()}")
     group_b = _create_group(engine, f"Event Group B {uuid.uuid4()}")
+    group_c = _create_group(engine, f"Event Group C {uuid.uuid4()}")
 
     admin_a_phone = _next_phone()
     admin_b_phone = _next_phone()
+    admin_c_phone = _next_phone()
     root_phone = _next_phone()
 
     admin_a = _create_user(engine, "GROUP_ADMIN", admin_a_phone, group_a.id)
     admin_b = _create_user(engine, "GROUP_ADMIN", admin_b_phone, group_b.id)
+    admin_c = _create_user(engine, "GROUP_ADMIN", admin_c_phone, group_c.id)
     root = _create_user(engine, "SUPER_ADMIN", root_phone)
 
     return {
         "group_a": group_a.id,
         "group_b": group_b.id,
+        "group_c": group_c.id,
         "admin_a_id": admin_a.id,
         "admin_b_id": admin_b.id,
+        "admin_c_id": admin_c.id,
         "root_id": root.id,
         "tokens": {
             "admin_a": _login(client, admin_a_phone),
             "admin_b": _login(client, admin_b_phone),
+            "admin_c": _login(client, admin_c_phone),
             "root": _login(client, root_phone),
         },
     }
@@ -149,6 +156,23 @@ def _create_event(client, world, token: str, **overrides) -> dict:
     )
     assert response.status_code == 200, response.text
     return response.json()["data"]
+
+
+def _make_ungrouped_event(client, world, engine, title: str) -> dict:
+    event = _create_event(
+        client,
+        world,
+        "root",
+        title=title,
+        group_ids=[str(world["group_a"])],
+    )
+    with Session(engine) as session:
+        stored = session.get(Event, uuid.UUID(event["id"]))
+        assert stored is not None
+        stored.group_id = None
+        stored.event_groups.clear()
+        session.commit()
+    return event
 
 
 # --- host defaults --------------------------------------------------------
@@ -749,3 +773,204 @@ def test_the_media_rows_are_released_with_the_event(client, world, engine):
             )
         ).scalars().all()
         assert blobs == []
+
+# --- multiple groups ------------------------------------------------------
+
+
+def test_an_event_can_be_shared_with_several_groups(client, world):
+    title = f"Shared event {uuid.uuid4()}"
+    event = _create_event(
+        client,
+        world,
+        "root",
+        title=title,
+        group_ids=[str(world["group_a"]), str(world["group_b"])],
+    )
+
+    assert event["group_id"] == str(world["group_a"])
+    assert set(event["group_ids"]) == {str(world["group_a"]), str(world["group_b"])}
+
+    for token in ("admin_a", "admin_b"):
+        response = client.get(
+            f"/api/v1/events/{event['id']}",
+            headers=_auth(world["tokens"][token]),
+        )
+        assert response.status_code == 200, response.text
+        assert set(response.json()["data"]["group_ids"]) == {
+            str(world["group_a"]),
+            str(world["group_b"]),
+        }
+
+    response = client.get(
+        f"/api/v1/events/{event['id']}",
+        headers=_auth(world["tokens"]["admin_c"]),
+    )
+    assert response.status_code == 404, response.text
+
+    response = client.get(
+        f"/api/v1/events/{event['id']}/images",
+        headers=_auth(world["tokens"]["admin_c"]),
+    )
+    assert response.status_code == 404, response.text
+
+
+def test_a_list_only_contains_events_for_the_callers_groups(client, world):
+    title = f"Scoped shared event {uuid.uuid4()}"
+    event = _create_event(
+        client,
+        world,
+        "root",
+        title=title,
+        group_ids=[str(world["group_a"]), str(world["group_b"])],
+    )
+
+    response = client.get(
+        f"/api/v1/events?search={title}&page_size=100",
+        headers=_auth(world["tokens"]["admin_c"]),
+    )
+    assert response.status_code == 200, response.text
+    assert event["id"] not in {item["id"] for item in response.json()["data"]}
+
+    response = client.get(
+        f"/api/v1/events?search={title}&page_size=100",
+        headers=_auth(world["tokens"]["admin_b"]),
+    )
+    assert response.status_code == 200, response.text
+    assert event["id"] in {item["id"] for item in response.json()["data"]}
+
+
+def test_updating_the_selection_changes_who_can_see_the_event(client, world):
+    title = f"Reassigned event {uuid.uuid4()}"
+    event = _create_event(
+        client,
+        world,
+        "root",
+        title=title,
+        group_ids=[str(world["group_a"])],
+    )
+
+    response = client.patch(
+        f"/api/v1/events/{event['id']}",
+        json={"group_ids": [str(world["group_b"])]},
+        headers=_auth(world["tokens"]["root"]),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["group_id"] == str(world["group_b"])
+    assert response.json()["data"]["group_ids"] == [str(world["group_b"])]
+
+    response = client.get(
+        f"/api/v1/events/{event['id']}",
+        headers=_auth(world["tokens"]["admin_a"]),
+    )
+    assert response.status_code == 404, response.text
+
+    response = client.get(
+        f"/api/v1/events/{event['id']}",
+        headers=_auth(world["tokens"]["admin_b"]),
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_group_admin_cannot_move_an_event_to_another_group(client, world):
+    event = _create_event(client, world, "admin_a")
+
+    response = client.patch(
+        f"/api/v1/events/{event['id']}",
+        json={"group_ids": [str(world["group_b"])]},
+        headers=_auth(world["tokens"]["admin_a"]),
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_a_new_event_needs_at_least_one_group(client, world):
+    response = client.post(
+        "/api/v1/events",
+        json=_event_payload(),
+        headers=_auth(world["tokens"]["root"]),
+    )
+    assert response.status_code == 400, response.text
+
+
+def test_super_admin_sees_events_from_every_group(client, world):
+    marker = f"Super Admin View {uuid.uuid4()}"
+    event_a = _create_event(client, world, "admin_a", title=f"{marker} A")
+    event_b = _create_event(client, world, "admin_b", title=f"{marker} B")
+
+    response = client.get(
+        f"/api/v1/events?search={marker}&page_size=100",
+        headers=_auth(world["tokens"]["root"]),
+    )
+
+    assert response.status_code == 200, response.text
+    ids = {item["id"] for item in response.json()["data"]}
+    assert {event_a["id"], event_b["id"]} <= ids
+
+
+def test_super_admin_group_query_does_not_narrow_the_list(client, world):
+    title = f"Unfiltered Super Admin {uuid.uuid4()}"
+    event = _create_event(
+        client,
+        world,
+        "root",
+        title=title,
+        group_ids=[str(world["group_b"])],
+    )
+
+    response = client.get(
+        f"/api/v1/events?group_id={world['group_a']}&search={title}",
+        headers=_auth(world["tokens"]["root"]),
+    )
+
+    assert response.status_code == 200, response.text
+    assert event["id"] in {item["id"] for item in response.json()["data"]}
+
+
+def test_legacy_ungrouped_events_remain_visible_to_super_admin(client, world, engine):
+    title = f"Legacy Ungrouped {uuid.uuid4()}"
+    event = _make_ungrouped_event(client, world, engine, title)
+
+    root_list = client.get(
+        f"/api/v1/events?search={title}",
+        headers=_auth(world["tokens"]["root"]),
+    )
+    assert root_list.status_code == 200, root_list.text
+    assert event["id"] in {item["id"] for item in root_list.json()["data"]}
+
+    admin_list = client.get(
+        f"/api/v1/events?search={title}",
+        headers=_auth(world["tokens"]["admin_a"]),
+    )
+    assert admin_list.status_code == 200, admin_list.text
+    assert event["id"] not in {item["id"] for item in admin_list.json()["data"]}
+
+    admin_detail = client.get(
+        f"/api/v1/events/{event['id']}",
+        headers=_auth(world["tokens"]["admin_a"]),
+    )
+    assert admin_detail.status_code == 404, admin_detail.text
+
+
+def test_members_only_see_events_for_their_groups(client, world, engine):
+    phone = _next_phone()
+    _create_user(engine, "MEMBER", phone, world["group_a"])
+    token = _login(client, phone)
+
+    marker = f"Member Visibility {uuid.uuid4()}"
+    event_a = _create_event(client, world, "admin_a", title=f"{marker} A")
+    event_b = _create_event(client, world, "admin_b", title=f"{marker} B")
+
+    response = client.get(
+        f"/api/v1/events?search={marker}&page_size=100",
+        headers=_auth(token),
+    )
+    assert response.status_code == 200, response.text
+    ids = {item["id"] for item in response.json()["data"]}
+    assert event_a["id"] in ids
+    assert event_b["id"] not in ids
+
+    detail = client.get(
+        f"/api/v1/events/{event_b['id']}",
+        headers=_auth(token),
+    )
+    assert detail.status_code == 404, detail.text
+

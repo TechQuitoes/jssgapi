@@ -4,10 +4,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 
 from app.core.constants import EventTimeFrame, EventType
 from app.models.event import Event
+from app.models.event_group import EventGroup
 from app.repositories.base_repository import BaseRepository
 
 
@@ -32,8 +33,7 @@ class EventRepository(BaseRepository[Event]):
     def _clauses(
         self,
         *,
-        group_id: UUID | None,
-        ungrouped_only: bool,
+        group_ids: set[UUID] | None,
         include_ungrouped: bool,
         time_frame: EventTimeFrame | None,
         event_type: EventType | None,
@@ -43,14 +43,23 @@ class EventRepository(BaseRepository[Event]):
         public_only: bool = False,
     ) -> list:
         clauses: list[Any] = [Event.is_deleted.is_(False)]
-        if group_id is not None:
-            clauses.append(Event.group_id == group_id)
-        elif ungrouped_only:
-            # The caller has no group of their own, so the only events they may
-            # see are the platform-wide ones.
-            clauses.append(Event.group_id.is_(None))
+        if group_ids is not None:
+            group_match = or_(
+                Event.group_id.in_(group_ids),
+                Event.event_groups.any(EventGroup.group_id.in_(group_ids)),
+            )
+            if include_ungrouped:
+                # A legacy event with no group at all stays platform-wide. An
+                # event whose primary group was deleted but still has another
+                # selected group is grouped, not ungrouped.
+                ungrouped = and_(Event.group_id.is_(None), ~Event.event_groups.any())
+                clauses.append(or_(group_match, ungrouped))
+            else:
+                clauses.append(group_match)
         elif not include_ungrouped:
-            clauses.append(Event.group_id.is_not(None))
+            clauses.append(
+                or_(Event.group_id.is_not(None), Event.event_groups.any())
+            )
         if time_frame is not None:
             if time_frame is EventTimeFrame.PAST:
                 clauses.append(Event.starts_at < now)
@@ -77,8 +86,7 @@ class EventRepository(BaseRepository[Event]):
     def _statement(
         self,
         *,
-        group_id: UUID | None,
-        ungrouped_only: bool = False,
+        group_ids: set[UUID] | None,
         include_ungrouped: bool = True,
         time_frame: EventTimeFrame | None,
         event_type: EventType | None,
@@ -90,8 +98,7 @@ class EventRepository(BaseRepository[Event]):
     ) -> Select:
         stmt = select(Event).where(
             *self._clauses(
-                group_id=group_id,
-                ungrouped_only=ungrouped_only,
+                group_ids=group_ids,
                 include_ungrouped=include_ungrouped,
                 time_frame=time_frame,
                 event_type=event_type,
@@ -107,8 +114,7 @@ class EventRepository(BaseRepository[Event]):
     async def list_filtered(
         self,
         *,
-        group_id: UUID | None = None,
-        ungrouped_only: bool = False,
+        group_ids: set[UUID] | None = None,
         include_ungrouped: bool = True,
         time_frame: EventTimeFrame | None = None,
         event_type: EventType | None = None,
@@ -121,8 +127,7 @@ class EventRepository(BaseRepository[Event]):
         offset: int = 0,
     ) -> list[Event]:
         stmt = self._statement(
-            group_id=group_id,
-            ungrouped_only=ungrouped_only,
+            group_ids=group_ids,
             include_ungrouped=include_ungrouped,
             time_frame=time_frame,
             event_type=event_type,
@@ -138,8 +143,7 @@ class EventRepository(BaseRepository[Event]):
     async def count_filtered(
         self,
         *,
-        group_id: UUID | None = None,
-        ungrouped_only: bool = False,
+        group_ids: set[UUID] | None = None,
         include_ungrouped: bool = True,
         time_frame: EventTimeFrame | None = None,
         event_type: EventType | None = None,
@@ -150,8 +154,7 @@ class EventRepository(BaseRepository[Event]):
     ) -> int:
         stmt = select(func.count()).select_from(Event).where(
             *self._clauses(
-                group_id=group_id,
-                ungrouped_only=ungrouped_only,
+                group_ids=group_ids,
                 include_ungrouped=include_ungrouped,
                 time_frame=time_frame,
                 event_type=event_type,

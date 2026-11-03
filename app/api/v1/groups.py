@@ -31,6 +31,7 @@ from app.models.member import Member
 from app.models.user import Role, User
 from app.repositories.group_repository import GroupRepository
 from app.repositories.member_repository import (
+    MEMBER_PROFILE_LOADS,
     MemberRepository,
     member_group_filter,
 )
@@ -391,7 +392,7 @@ async def list_group_members(
 
     stmt = select(Member).where(
         member_group_filter(group_id), Member.is_deleted.is_(False)
-    )
+    ).options(*MEMBER_PROFILE_LOADS)
     if status is not None:
         stmt = stmt.where(Member.membership_status == status)
 
@@ -448,6 +449,59 @@ def _group_member_out(
         or (member.profile_data or {}).get("social_group_name")
     )
     group_name = member.group.name if member.group and not getattr(member.group, "is_deleted", False) else None
+
+    # Build the full groups list (primary + secondary) with names for frontend display.
+    memberships_list = sorted(
+        getattr(member, "group_memberships", None) or [],
+        key=lambda item: item.priority,
+    )
+    groups = []
+    group_memberships_out = []
+    for m in memberships_list:
+        grp = m.group
+        if grp is not None and getattr(grp, "is_deleted", False):
+            continue
+        gid = (grp.group_id if grp and grp.group_id else None) or str(m.group_id)
+        gname = (grp.name if grp else None) or m.group_name or ""
+        mnum = m.membership_number or (member.membership_number if m.is_primary else None)
+        groups.append({
+            "group_id": gid,
+            "group_name": gname,
+            "membership_number": mnum,
+            "is_primary": m.is_primary,
+        })
+        group_memberships_out.append({
+            "id": m.id,
+            "group_id": m.group_id,
+            "group_name": m.group_name,
+            "group_code": m.group_code,
+            "membership_number": mnum,
+            "priority": m.priority,
+            "is_primary": m.is_primary,
+            "joined_at": m.joined_at,
+        })
+
+    # Fallback: if no membership rows exist, use the legacy group_id pointer.
+    if not groups and member.group and not getattr(member.group, "is_deleted", False):
+        gid = member.group.group_id or str(member.group.id)
+        gname = member.group.name
+        groups.append({
+            "group_id": gid,
+            "group_name": gname,
+            "membership_number": member.membership_number,
+            "is_primary": True,
+        })
+        group_memberships_out.append({
+            "id": member.id,
+            "group_id": member.group.id,
+            "group_name": member.group.name,
+            "group_code": member.group.group_id,
+            "membership_number": member.membership_number,
+            "priority": 1,
+            "is_primary": True,
+            "joined_at": member.joined_at,
+        })
+
     return GroupMemberOut(
         id=member.id,
         member_id=member.id,
@@ -467,11 +521,10 @@ def _group_member_out(
         social_group_association_name=raw_group or group_name,
         group_ids=[
             row.group_id
-            for row in sorted(
-                getattr(member, "group_memberships", None) or [],
-                key=lambda item: item.priority,
-            )
+            for row in memberships_list
         ],
+        groups=groups,
+        group_memberships=group_memberships_out,
         contact_email=member.contact_email,
         contact_phone=member.contact_phone,
         profile_photo_url=member.profile_photo_url,

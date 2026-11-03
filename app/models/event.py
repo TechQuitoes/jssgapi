@@ -12,6 +12,7 @@ from app.core.constants import EventType
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from app.models.event_group import EventGroup
     from app.models.group import SocialGroup
     from app.models.location import Location
     from app.models.user import User
@@ -88,8 +89,25 @@ class Event(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     group: Mapped[SocialGroup | None] = relationship()
+    event_groups: Mapped[list[EventGroup]] = relationship(
+        back_populates="event",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="EventGroup.created_at",
+    )
     location: Mapped[Location | None] = relationship()
     host: Mapped[User | None] = relationship()
+
+    @property
+    def group_ids(self) -> list[uuid.UUID]:
+        """Every selected group, with the legacy primary group first."""
+        ordered: list[uuid.UUID] = []
+        if self.group_id is not None:
+            ordered.append(self.group_id)
+        for link in self.event_groups:
+            if link.group_id not in ordered:
+                ordered.append(link.group_id)
+        return ordered
 
     def __repr__(self) -> str:
         return f"<Event {self.title}>"

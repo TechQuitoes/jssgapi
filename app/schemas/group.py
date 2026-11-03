@@ -12,6 +12,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.schemas.profile import MemberGroupMembershipOut, ProfileGroupItem
+
 
 class SocialGroupCreate(BaseModel):
     """``POST /groups`` body.
@@ -184,6 +186,9 @@ class GroupMemberOut(BaseModel):
     status: str | None = None
     group_id: UUID | None = None
     group_ids: list[UUID] = []
+    # All groups the member belongs to (primary + secondary), each with id & name.
+    groups: list[ProfileGroupItem] = []
+    group_memberships: list[MemberGroupMembershipOut] = []
     group_name: str | None = None
     social_group_name: str | None = None
     social_group_association_name: str | None = None

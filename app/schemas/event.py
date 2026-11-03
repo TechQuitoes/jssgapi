@@ -34,6 +34,14 @@ def _clean_phone(value: str | None) -> str | None:
     return cleaned
 
 
+def _ordered_group_ids(values: list[UUID] | None) -> list[UUID]:
+    ordered: list[UUID] = []
+    for value in values or []:
+        if value not in ordered:
+            ordered.append(value)
+    return ordered
+
+
 def _as_local(value: datetime) -> datetime:
     """A datetime in the platform timezone; a naive one is read as UTC."""
     tz = get_app_tz()
@@ -71,6 +79,7 @@ class EventCreate(BaseModel):
     max_attendees: int | None = Field(default=None, ge=1)
     registration_required: bool = False
     group_id: UUID | None = None
+    group_ids: list[UUID] | None = None
     location_id: UUID | None = None
 
     @field_validator("event_date", mode="before")
@@ -107,6 +116,13 @@ class EventCreate(BaseModel):
             self.event_type_other = None
         return self
 
+    def requested_group_ids(self) -> list[UUID]:
+        """Ordered selection, preferring ``group_ids`` over legacy ``group_id``."""
+        source = self.group_ids
+        if source is None and self.group_id is not None:
+            source = [self.group_id]
+        return _ordered_group_ids(source)
+
 
 class EventUpdate(BaseModel):
     """Patch an event. Every field is optional; only what is sent changes."""
@@ -132,6 +148,7 @@ class EventUpdate(BaseModel):
     max_attendees: int | None = Field(default=None, ge=1)
     registration_required: bool | None = None
     group_id: UUID | None = None
+    group_ids: list[UUID] | None = None
     location_id: UUID | None = None
 
     @field_validator("event_date", mode="before")
@@ -181,6 +198,16 @@ class EventUpdate(BaseModel):
             self.event_type_other = None
         return self
 
+    def requested_group_ids(self) -> list[UUID] | None:
+        """The ordered selection sent, or ``None`` when no group field changed."""
+        if "group_ids" in self.model_fields_set:
+            source = self.group_ids
+        elif "group_id" in self.model_fields_set:
+            source = [self.group_id] if self.group_id is not None else []
+        else:
+            return None
+        return _ordered_group_ids(source)
+
 
 class EventImageOut(BaseModel):
     """One image in an event's gallery."""
@@ -227,6 +254,7 @@ class EventOut(BaseModel):
     max_attendees: int | None = None
     registration_required: bool
     group_id: UUID | None = None
+    group_ids: list[UUID] = Field(default_factory=list)
     location_id: UUID | None = None
     image_count: int = 0
     created_at: datetime

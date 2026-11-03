@@ -22,12 +22,19 @@ from app.core.exceptions import (
 from app.core.permissions import Permission
 from app.core.responses import created, ok, paginated
 from app.core.scope import (
-    assert_group_access,
     get_access_scope,
-    resolve_managed_group,
+    get_admin_scope,
+    member_group_ids,
 )
-from app.dependencies import CurrentUser, DBSession, get_current_user, require_permission
+from app.dependencies import (
+    CurrentUser,
+    DBSession,
+    get_current_user,
+    require_permission,
+)
 from app.models.event import Event
+from app.models.event_group import EventGroup
+from app.models.group import SocialGroup
 from app.models.user import User
 from app.repositories.event_repository import EventRepository
 from app.schemas.event import (
@@ -88,18 +95,120 @@ def _role_of(user: User) -> RoleName | None:
 
 @dataclass(frozen=True)
 class ReadScope:
-    """Which events a caller may see."""
+    """Which events a caller may see.
 
-    group_id: UUID | None = None
-    ungrouped_only: bool = False
+    Only unrestricted callers include legacy events with no group mapping.
+    Scoped callers must match an assigned group, so an ungrouped event cannot
+    leak across group boundaries.
+    """
+
+    group_ids: set[UUID] | None = None
     include_ungrouped: bool = True
     public_only: bool = False
 
 
+async def _effective_member_group_ids(
+    db: DBSession, primary_group_id: UUID | None, member_id: UUID | None
+) -> set[UUID]:
+    effective: set[UUID] = set()
+    if primary_group_id is not None:
+        effective.add(primary_group_id)
+    if member_id is not None:
+        effective.update(await member_group_ids(db, member_id))
+    return effective
+
+
 async def _read_scope(
-    db: DBSession, current_user: User, group_id: UUID | None
+    db: DBSession, current_user: User, requested_group_id: UUID | None
 ) -> ReadScope:
-    return ReadScope(group_id=group_id)
+    """Resolve the groups whose events this caller may list.
+
+    Super Admins always see every live event, including legacy events with no
+    group mapping; ``requested_group_id`` never narrows their listing. Group
+    Admins are limited to their own group. Members see events for every group
+    they belong to, and only public events. Scoped roles never see an event that
+    has no group assignment.
+    """
+    access = await get_access_scope(db, current_user)
+    role = _role_of(current_user)
+
+    if access.unrestricted:
+        return ReadScope(group_ids=None, include_ungrouped=True)
+
+    if role is RoleName.GROUP_ADMIN:
+        if access.group_id is None:
+            return ReadScope(group_ids=set(), include_ungrouped=False)
+        if requested_group_id is not None and requested_group_id != access.group_id:
+            raise ForbiddenException("Operation is limited to your own group")
+        return ReadScope(group_ids={access.group_id}, include_ungrouped=False)
+
+    if role is RoleName.MEMBER:
+        effective = await _effective_member_group_ids(
+            db, access.group_id, access.member_id
+        )
+        if requested_group_id is not None:
+            if requested_group_id not in effective:
+                raise ForbiddenException("Operation is limited to your groups")
+            effective = {requested_group_id}
+        return ReadScope(group_ids=effective, include_ungrouped=False, public_only=True)
+
+    return ReadScope(group_ids=set(), include_ungrouped=False, public_only=True)
+
+
+async def _resolve_event_group_ids(
+    db: DBSession,
+    current_user: User,
+    requested_group_ids: list[UUID],
+    *,
+    creating: bool,
+) -> list[UUID]:
+    """Validate a group selection and apply the caller's role limits."""
+    scope = await get_admin_scope(db, current_user)
+    if not requested_group_ids:
+        if creating and scope is not None:
+            requested_group_ids = [scope]
+        else:
+            raise BadRequestException(
+                "An event must be associated with at least one group"
+            )
+    if scope is not None and any(group_id != scope for group_id in requested_group_ids):
+        raise ForbiddenException("Operation is limited to your own group")
+
+    resolved: list[UUID] = []
+    for group_id in requested_group_ids:
+        group = await db.get(SocialGroup, group_id)
+        if group is None or group.is_deleted:
+            raise BadRequestException("Social group not found")
+        if group_id not in resolved:
+            resolved.append(group_id)
+    return resolved
+
+
+async def _replace_event_groups(
+    db: DBSession, event: Event, group_ids: list[UUID]
+) -> None:
+    await db.refresh(event, ["event_groups"])
+    existing = list(event.event_groups or [])
+    keep = {link.group_id for link in existing}
+    wanted = set(group_ids)
+    for link in existing:
+        if link.group_id not in wanted:
+            await db.delete(link)
+    for group_id in group_ids:
+        if group_id not in keep:
+            db.add(EventGroup(event_id=event.id, group_id=group_id))
+    await db.flush()
+    await db.refresh(event, ["event_groups"])
+
+
+async def _assert_can_manage_event(
+    db: DBSession, current_user: User, event: Event
+) -> None:
+    scope = await get_admin_scope(db, current_user)
+    if scope is None:
+        return
+    if scope not in event.group_ids:
+        raise ForbiddenException("Operation is limited to your own group")
 
 
 def _event_out(event: Event, image_count: int = 0) -> EventOut:
@@ -120,23 +229,30 @@ async def _get_visible_event(
 ) -> Event:
     """Fetch an event the caller is allowed to see."""
     event = await _get_event_or_404(db, event_id)
-    scope = await get_access_scope(db, current_user)
+    access = await get_access_scope(db, current_user)
     role = _role_of(current_user)
 
-    if scope.unrestricted:
+    if access.unrestricted:
         return event
+
+    event_group_ids = set(event.group_ids)
 
     if role is RoleName.GROUP_ADMIN:
-        if event.group_id is not None and event.group_id != scope.group_id:
+        if access.group_id in event_group_ids:
+            return event
+        raise NotFoundException("Event", str(event_id))
+
+    if role is RoleName.MEMBER:
+        if not event.is_public:
             raise NotFoundException("Event", str(event_id))
-        return event
-
-    if not event.is_public:
+        effective = await _effective_member_group_ids(
+            db, access.group_id, access.member_id
+        )
+        if event_group_ids & effective:
+            return event
         raise NotFoundException("Event", str(event_id))
-    if scope.group_id is not None and event.group_id not in (None, scope.group_id):
-        raise NotFoundException("Event", str(event_id))
-    return event
 
+    raise NotFoundException("Event", str(event_id))
 
 # --------------------------------------------------------------------------
 # listing
@@ -166,8 +282,7 @@ async def list_events(
     now, window_end = time_frame_bounds()
 
     total = await repo.count_filtered(
-        group_id=scope.group_id,
-        ungrouped_only=scope.ungrouped_only,
+        group_ids=scope.group_ids,
         include_ungrouped=scope.include_ungrouped,
         public_only=scope.public_only,
         time_frame=time_frame,
@@ -177,8 +292,7 @@ async def list_events(
         window_end=window_end,
     )
     items = await repo.list_filtered(
-        group_id=scope.group_id,
-        ungrouped_only=scope.ungrouped_only,
+        group_ids=scope.group_ids,
         include_ungrouped=scope.include_ungrouped,
         public_only=scope.public_only,
         time_frame=time_frame,
@@ -245,8 +359,7 @@ async def _list_by_frame(
     scope = await _read_scope(db, current_user, None)
     now, window_end = time_frame_bounds()
     items = await repo.list_filtered(
-        group_id=scope.group_id,
-        ungrouped_only=scope.ungrouped_only,
+        group_ids=scope.group_ids,
         include_ungrouped=scope.include_ungrouped,
         public_only=scope.public_only,
         time_frame=frame,
@@ -295,8 +408,12 @@ async def create_event(body: EventCreate, current_user: CurrentUser, db: DBSessi
     The host defaults to the account creating it: the uploader's name and
     contact number are filled in unless the request names a different host.
     """
+    group_ids = await _resolve_event_group_ids(
+        db, current_user, body.requested_group_ids(), creating=True
+    )
     data = body.model_dump()
-    data["group_id"] = await resolve_managed_group(db, current_user, body.group_id)
+    data.pop("group_ids", None)
+    data["group_id"] = group_ids[0]
     data["event_type"] = body.event_type.value
     data["status"] = body.status.value
 
@@ -315,6 +432,7 @@ async def create_event(body: EventCreate, current_user: CurrentUser, db: DBSessi
     apply_timing(event)
     db.add(event)
     await db.flush()
+    await _replace_event_groups(db, event, group_ids)
     await db.refresh(event)
 
     await AuditService(db).log(
@@ -336,12 +454,20 @@ async def update_event(
     event = await repo.get_by_id(event_id)
     if event is None:
         raise NotFoundException("Event", str(event_id))
-    await assert_group_access(db, current_user, event.group_id)
-    if body.group_id is not None:
-        await assert_group_access(db, current_user, body.group_id)
+    await _assert_can_manage_event(db, current_user, event)
+    requested_group_ids = body.requested_group_ids()
+    group_ids: list[UUID] | None = None
+    if requested_group_ids is not None:
+        group_ids = await _resolve_event_group_ids(
+            db, current_user, requested_group_ids, creating=False
+        )
 
     data = body.model_dump(exclude_unset=True, exclude_none=True)
     data.pop("starts_at", None)
+    data.pop("group_ids", None)
+    data.pop("group_id", None)
+    if group_ids is not None:
+        data["group_id"] = group_ids[0]
     if body.event_type is not None:
         data["event_type"] = body.event_type.value
     for key, value in data.items():
@@ -362,6 +488,8 @@ async def update_event(
         event.starts_at = combine_local(event.event_date, event.event_time)
 
     event = await repo.update(event)
+    if group_ids is not None:
+        await _replace_event_groups(db, event, group_ids)
     await AuditService(db).log(
         AuditAction.EVENT_UPDATE,
         user_id=current_user.id,
@@ -378,7 +506,7 @@ async def delete_event(event_id: UUID, current_user: CurrentUser, db: DBSession)
     event = await repo.get_by_id(event_id)
     if event is None:
         raise NotFoundException("Event", str(event_id))
-    await assert_group_access(db, current_user, event.group_id)
+    await _assert_can_manage_event(db, current_user, event)
 
     # The stored objects go with the event, not just the rows.
     await EventImageService(db).delete_all_for_event(event)
@@ -409,7 +537,7 @@ async def upload_event_cover(
 ):
     """Upload or replace the event's cover image."""
     event = await _get_event_or_404(db, event_id)
-    await assert_group_access(db, current_user, event.group_id)
+    await _assert_can_manage_event(db, current_user, event)
 
     content = await file.read()
     url = await EventService(db).upload_cover(
@@ -442,7 +570,7 @@ async def delete_event_cover(
 ):
     """Remove the event's cover image."""
     event = await _get_event_or_404(db, event_id)
-    await assert_group_access(db, current_user, event.group_id)
+    await _assert_can_manage_event(db, current_user, event)
     await EventService(db).remove_cover(event)
     await db.flush()
     await db.refresh(event)
@@ -459,7 +587,7 @@ async def list_event_images(
     event_id: UUID, db: DBSession, current_user: CurrentUser
 ):
     """The event's gallery, in upload order."""
-    event = await _get_event_or_404(db, event_id)
+    event = await _get_visible_event(db, current_user, event_id)
     images = await EventImageService(db).list_images(event)
     return ok(
         "Event images fetched successfully",
@@ -482,7 +610,7 @@ async def upload_event_images(
     request nor a series of requests can push an event past the limit.
     """
     event = await _get_event_or_404(db, event_id)
-    await assert_group_access(db, current_user, event.group_id)
+    await _assert_can_manage_event(db, current_user, event)
 
     if not files:
         raise BadRequestException("At least one image is required", "NO_IMAGES")
@@ -532,7 +660,7 @@ async def delete_event_image(
 ):
     """Remove one image from the event's gallery, freeing a slot."""
     event = await _get_event_or_404(db, event_id)
-    await assert_group_access(db, current_user, event.group_id)
+    await _assert_can_manage_event(db, current_user, event)
 
     service = EventImageService(db)
     image = await service.find_image(event, image_id)
