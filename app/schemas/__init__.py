@@ -15,6 +15,7 @@ from app.schemas.auth import (  # noqa: F401
     RefreshRequest,
     RegisterRequest,
 )
+from app.schemas.dashboard import DashboardStatisticsOut  # noqa: F401
 from app.schemas.event import (  # noqa: F401
     EventCreate,
     EventDetailOut,

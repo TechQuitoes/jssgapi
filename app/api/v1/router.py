@@ -6,6 +6,7 @@ from app.api.v1.advertisements import router as advertisements_router
 from app.api.v1.audit import router as audit_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.celebrations import router as celebrations_router
+from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.events import router as events_router
 from app.api.v1.family import router as family_router
 from app.api.v1.fees import router as fees_router
@@ -47,6 +48,7 @@ for resource_router in [
     fees_router,
     payments_router,
     audit_router,
+    dashboard_router,
 ]:
     v1_router.include_router(resource_router)
 
