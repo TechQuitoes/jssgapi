@@ -16,6 +16,9 @@ class RoleName(str, Enum):
     MEMBER = "MEMBER"
 
 
+DEFAULT_USER_PASSWORD = "Pass@1234"
+
+
 # Canonical lookup: the three RoleName values are the ONLY roles the system recognises.
 # The `roles` table is populated from external sources (Excel / Google Sheet imports),
 # which have historically stored whitespace-polluted labels such as "Admin\n". Those

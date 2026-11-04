@@ -55,6 +55,12 @@ class SocialGroupCreate(BaseModel):
             "admin_phone_number", "admin_phone", "admin_mobile_number"
         ),
     )
+    admin_password: str | None = Field(
+        default=None,
+        min_length=6,
+        max_length=128,
+        validation_alias=AliasChoices("admin_password", "password"),
+    )
 
     @field_validator("state", "city")
     @classmethod

@@ -10,7 +10,13 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
-from app.core.constants import AuditAction, MemberStatus, RoleName, resolve_role_name
+from app.core.constants import (
+    DEFAULT_USER_PASSWORD,
+    AuditAction,
+    MemberStatus,
+    RoleName,
+    resolve_role_name,
+)
 from app.core.exceptions import (
     BadRequestException,
     ConflictException,
@@ -102,7 +108,11 @@ async def _get_user_by_phone_forms(
 
 
 async def _assign_default_group_admin(
-    db, group: SocialGroup, admin_name: str, admin_phone_number: str
+    db,
+    group: SocialGroup,
+    admin_name: str,
+    admin_phone_number: str,
+    admin_password: str | None = None,
 ) -> User:
     """Create or promote the admin account and link its member record.
 
@@ -119,12 +129,15 @@ async def _assign_default_group_admin(
     user = await _get_user_by_phone_forms(user_repo, normalized)
     is_new_user = user is None
     if user is None:
+        raw_password = (
+            admin_password.strip()
+            if admin_password and admin_password.strip()
+            else DEFAULT_USER_PASSWORD
+        )
         user = await user_repo.create(
             phone_number=normalized,
             full_name=admin_name.strip(),
-            # NOT NULL column: OTP/Firebase login is how this account signs in,
-            # so the password stays unknowable.
-            password_hash=hash_password(secrets.token_urlsafe(32)),
+            password_hash=hash_password(raw_password),
             is_active=True,
             role_id=role.id,
             group_id=group.id,
@@ -132,6 +145,8 @@ async def _assign_default_group_admin(
     else:
         user.role_id = role.id
         user.group_id = group.id
+        if admin_password and admin_password.strip():
+            user.password_hash = hash_password(admin_password.strip())
         await db.flush()
         await db.refresh(user)
 
@@ -299,7 +314,11 @@ async def create_group(body: SocialGroupCreate, db: DBSession):
         if body.admin_name is not None:
             assert body.admin_phone_number is not None
             await _assign_default_group_admin(
-                db, existing, body.admin_name, body.admin_phone_number
+                db,
+                existing,
+                body.admin_name,
+                body.admin_phone_number,
+                admin_password=body.admin_password,
             )
             await db.refresh(existing, ["admins"])
         return created(
@@ -307,7 +326,9 @@ async def create_group(body: SocialGroupCreate, db: DBSession):
         )
     # ``group_id`` and the admin fields are dropped from the group row: the
     # server owns the ID, and the account is written separately below.
-    values = body.model_dump(exclude={"group_id", "admin_name", "admin_phone_number"})
+    values = body.model_dump(
+        exclude={"group_id", "admin_name", "admin_phone_number", "admin_password"}
+    )
     values["state"] = city.state
     values["city"] = city.city
     try:
@@ -318,7 +339,11 @@ async def create_group(body: SocialGroupCreate, db: DBSession):
         if body.admin_name is not None:
             assert body.admin_phone_number is not None
             await _assign_default_group_admin(
-                db, group, body.admin_name, body.admin_phone_number
+                db,
+                group,
+                body.admin_name,
+                body.admin_phone_number,
+                admin_password=body.admin_password,
             )
         await db.flush()
     except IntegrityError as exc:
