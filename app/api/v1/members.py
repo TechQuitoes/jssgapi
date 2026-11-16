@@ -14,6 +14,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.permissions import Permission
+from app.core.redis import invalidate_member_cache, redis_client
 from app.core.responses import created, ok, paginated
 from app.core.security import hash_password
 from app.core.scope import (
@@ -239,6 +240,17 @@ async def list_members(
     # profile_completeness is only visible to Super Admin in the list view.
     show_profile_complete = scope.unrestricted
 
+    cache_key = (
+        f"cache:members:unrestricted:{show_profile_complete}:"
+        f"scope_m:{scope.member_id or 'none'}:scope_g:{scope.group_id or 'none'}:"
+        f"eff_g:{effective_group or 'none'}:gname:{group_name or 'none'}:"
+        f"status:{status or 'all'}:q:{query or 'all'}:trustee:{trustee_only}:"
+        f"desig:{designation or 'all'}:page:{page}:size:{page_size}"
+    )
+    cached = await redis_client.get_json(cache_key)
+    if cached is not None:
+        return cached
+
     if query:
         # The search envelope deliberately has no `pagination` key: the panel's
         # Members page already handles its absence and a search result set is a
@@ -253,13 +265,17 @@ async def list_members(
             limit=page_size,
             offset=(page - 1) * page_size,
         )
-        return ok(
+        res = ok(
             "Members fetched successfully",
             [
-                _member_list_item_out(m, profiles, show_profile_complete)
+                _member_list_item_out(m, profiles, show_profile_complete).model_dump(
+                    mode="json"
+                )
                 for m in members
             ],
         )
+        await redis_client.set_json(cache_key, res, ttl=600)
+        return res
 
     stmt = (
         select(Member)
@@ -294,9 +310,14 @@ async def list_members(
         stmt.order_by(Member.first_name).limit(page_size).offset((page - 1) * page_size)
     )
     items = list(result.scalars().all())
-    return paginated(
+    res = paginated(
         "Members fetched successfully",
-        [_member_list_item_out(i, profiles, show_profile_complete) for i in items],
+        [
+            _member_list_item_out(i, profiles, show_profile_complete).model_dump(
+                mode="json"
+            )
+            for i in items
+        ],
         {
             "page": page,
             "page_size": page_size,
@@ -304,6 +325,8 @@ async def list_members(
             "total_pages": (total + page_size - 1) // page_size,
         },
     )
+    await redis_client.set_json(cache_key, res, ttl=600)
+    return res
 
 
 @router.post("", dependencies=[CREATE])
@@ -403,6 +426,7 @@ async def create_member(body: MemberCreate, current_user: CurrentUser, db: DBSes
         AuditAction.MEMBER_CREATE, entity_type="member", entity_id=member.id
     )
     await db.flush()
+    await invalidate_member_cache()
     return created(
         "Member created successfully",
         _member_list_item(await _reload_member(db, member.id), profiles),
@@ -631,6 +655,7 @@ async def update_member(
         AuditAction.MEMBER_UPDATE, entity_type="member", entity_id=member.id
     )
     await db.flush()
+    await invalidate_member_cache()
     # `updated_at` is a server-side onupdate column, so it is expired after the
     # flush and reading it would trigger lazy IO outside the async context -
     # reload before serializing.
@@ -699,6 +724,7 @@ async def upload_member_photo(
         user_agent=user_agent,
     )
     await db.flush()
+    await invalidate_member_cache()
     # `updated_at` is server-side, so the row is expired by the flush above and
     # must be reloaded before it is serialized.
     member = await _reload_member(db, member.id)
@@ -744,6 +770,7 @@ async def delete_member_photo(
         user_agent=user_agent,
     )
     await db.flush()
+    await invalidate_member_cache()
     return _photo_response("Member photo deleted successfully", None, role=role)
 
 
@@ -797,6 +824,7 @@ async def approve_member(
         await db.flush()
     else:
         raise BadRequestException("Use update endpoint for status changes")
+    await invalidate_member_cache()
     member = await _reload_member(db, member.id)
     return ok("Member status updated successfully", _member_out(member))
 
@@ -825,4 +853,5 @@ async def delete_member(member_id: UUID, current_user: CurrentUser, db: DBSessio
                     user.role_id = member_role.id
     await MemberPhotoService(db).remove_all(member)
     await db.flush()
+    await invalidate_member_cache()
     return ok("Member deleted successfully")

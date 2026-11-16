@@ -6,6 +6,7 @@ from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.core.exceptions import BadRequestException, ValidationException
+from app.core.redis import invalidate_member_cache
 from app.core.responses import ok
 from app.dependencies import CurrentUser, DBSession
 from app.schemas.profile import ProfilePhotoResponse, ProfileResponse, ProfileUpdate
@@ -46,6 +47,7 @@ async def update_profile(
         current_user.id,
         body.model_dump(exclude_unset=True),
     )
+    await invalidate_member_cache()
     return ok("Profile updated successfully")
 
 
@@ -88,4 +90,5 @@ async def upload_profile_photo(
             status_code=400,
             content={"success": False, "message": "गलत फोटो फ़ाइल"},
         )
+    await invalidate_member_cache()
     return {"success": True, "photo_link": photo_link}

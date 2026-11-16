@@ -190,7 +190,9 @@ ROLE_PERMISSIONS: dict[RoleName, set[str]] = {
         Permission.MEDIA_READ,
         Permission.MEDIA_UPLOAD,
         Permission.PAYMENT_READ,
+        Permission.PAYMENT_MANAGE,
         Permission.FEE_READ,
+        Permission.FEE_MANAGE,
     },
     RoleName.MEMBER: {
         Permission.MEMBER_READ,

@@ -12,39 +12,25 @@ Member ID format:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 INDIA_RTO_ROWS = [
     "AN|1|port blair",
     "AN|2|car nicobar",
-    "AP|1|adilabad|mancherial|nirmal",
     "AP|2|anantapur|hindupur",
     "AP|3|chittoor|madanapalle|rajampet|tirupati",
     "AP|4|kadapa|proddatur",
     "AP|5|amalapuram|kakinada|rajahmundry",
     "AP|7|guntur|narasaraopet|piduguralla|repalle",
-    "AP|9|hyderabad|khairtabad",
-    "AP|10|secunderabad",
-    "AP|11|malakpet",
-    "AP|12|bahadurpura",
-    "AP|13|mehdipatnam",
-    "AP|14|karimnagar",
-    "AP|15|jagtial|peddapalli",
     "AP|16|bejawada|gudivada|machilipatnam|nandigama",
     "AP|18|nuzvid",
-    "AP|20|khammam|kothagudem|sathupally|yellandu",
     "AP|21|adoni|kurnool|nandyal",
-    "AP|22|gadwal|mahaboobnagar|pebbair",
-    "AP|23|medak|puram|sangareddy|siddipet",
-    "AP|24|bhongir|nalgonda|suryapet",
-    "AP|25|kamareddy|nizamabad",
     "AP|26|gudur|kavali|nellore|sullurpeta",
     "AP|27|chirala|markapur|ongole|prakasam",
-    "AP|28|rangareddy",
     "AP|30|ichchapuram|kaviti|palasa|sompeta|srikakulam|tekkali",
     "AP|31|anakapalli|gajuwaka|visakhapatnam",
     "AP|35|vizianagaram",
-    "AP|36|jangaon|mahabubabad|warangal",
     "AP|37|bhimavaram|chintalapudi|eluru|jangareddygudem|kovvur|palakollu|tadepalligudem|tanuku",
     "AR|1|itanagar",
     "AR|3|tawang",
@@ -78,7 +64,6 @@ INDIA_RTO_ROWS = [
     "AS|17|dhubri",
     "AS|18|goalpara",
     "AS|19|bongaigaon",
-    "AS|20|astc",
     "AS|21|marigaon",
     "AS|22|dhemaji",
     "AS|23|tinsukia",
@@ -142,20 +127,21 @@ INDIA_RTO_ROWS = [
     "CG|18|dantewada",
     "CG|19|kanker",
     "CG|20|bijapur",
+    "CH|1|chandigarh",
     "DD|9|silvassa",
-    "DL|1|delhi auto rickshaws radio|delhi nonresident indians|delhi north: mall road|delhi trucks",
-    "DL|2|delhi: tilak marg",
-    "DL|3|south delhi south: sheikh sarai",
-    "DL|4|west delhi west west janakpuri",
-    "DL|5|north east delhi: loni road",
-    "DL|6|central delhi central: sarai kale khan",
-    "DL|7|east delhi east mayur vihar",
-    "DL|8|north west delhi wazir pur",
-    "DL|9|palam|south west delhi south west janakpuri",
-    "DL|10|west delhiii: raja garden",
-    "DL|11|north west delhi north west ii: rohini",
-    "DL|12|south west delhi south west ii: vasant vihar",
-    "DL|13|east delhi ii: surajmal vihar|shahdara",
+    "DL|1|delhi",
+    "DL|2|new delhi",
+    "DL|3|south delhi|sheikh sarai",
+    "DL|4|west delhi|janakpuri",
+    "DL|5|north east delhi|loni road",
+    "DL|6|central delhi|sarai kale khan",
+    "DL|7|east delhi|mayur vihar",
+    "DL|8|north west delhi|wazir pur",
+    "DL|9|palam|south west delhi",
+    "DL|10|west delhi ii|raja garden",
+    "DL|11|north west delhi ii|rohini",
+    "DL|12|south west delhi ii|vasant vihar",
+    "DL|13|east delhi ii|surajmal vihar|shahdara",
     "GA|1|panaji",
     "GA|2|margao",
     "GA|3|mapusa",
@@ -195,7 +181,7 @@ INDIA_RTO_ROWS = [
     "GJ|28|west surat",
     "GJ|30|east rajkot",
     "HP|1|shimla",
-    "HP|4|autorikshaws|dharamsala",
+    "HP|4|dharamsala",
     "HP|5|mandi",
     "HP|6|rampur bushar",
     "HP|8|chaupal",
@@ -241,7 +227,7 @@ INDIA_RTO_ROWS = [
     "HP|56|jaisinghpur",
     "HP|57|chowari",
     "HP|58|manali",
-    "HR|1|ambala|see also|trucks",
+    "HR|1|ambala",
     "HR|2|yamuna nagar",
     "HR|3|panchkula",
     "HR|4|naraingarh",
@@ -293,7 +279,6 @@ INDIA_RTO_ROWS = [
     "HR|60|samalkha",
     "HR|65|kurukshetra",
     "HR|69|sonipat",
-    "HR|72|south",
     "HR|74|mewat",
     "HR|75|indri",
     "HR|76|pataudi",
@@ -302,7 +287,6 @@ INDIA_RTO_ROWS = [
     "HR|79|kharkhoda",
     "HR|80|barwala",
     "HR|88|kundli",
-    "HR|99|temporary",
     "JH|1|ranchi",
     "JH|2|hazaribagh|ramgarh",
     "JH|3|daltonganj",
@@ -327,7 +311,6 @@ INDIA_RTO_ROWS = [
     "JK|4|budgam",
     "JK|5|baramulla",
     "JK|6|doda",
-    "JK|7|kargil",
     "JK|8|kathua",
     "JK|9|kupwara",
     "JK|11|rajouri",
@@ -397,7 +380,7 @@ INDIA_RTO_ROWS = [
     "KA|54|nagamangala",
     "KA|55|mysore east",
     "KA|56|basavakalyan",
-    "KA|57|bmtc autos|ksrtc|shantinagar",
+    "KA|57|shantinagar",
     "KL|1|thiruvananthapuram",
     "KL|2|kollam",
     "KL|3|pathanamthitta",
@@ -412,7 +395,6 @@ INDIA_RTO_ROWS = [
     "KL|12|wayanad",
     "KL|13|kannur",
     "KL|14|kasargode",
-    "KL|15|kerala road",
     "KL|16|thiruvananthapuramattingal",
     "KL|17|muvattupuzha",
     "KL|18|vadakara",
@@ -463,13 +445,15 @@ INDIA_RTO_ROWS = [
     "KL|63|angamaly",
     "KL|64|chalakkudy",
     "KL|65|thirurangadi",
+    "LA|1|leh",
+    "LA|2|kargil",
     "LD|1|kavaratti",
-    "MH|1|central|located tardeo|mumbai",
-    "MH|2|located andheri west|west",
-    "MH|3|east|located wadala",
+    "MH|1|mumbai|tardeo",
+    "MH|2|andheri",
+    "MH|3|wadala",
     "MH|4|thane",
-    "MH|5|ambernath badlapur located kalyan|central suburbs|dombivli|kalyan|ulhasnagar",
-    "MH|6|does not include navi mumbai|kharghar panvel pen|raigad located pen",
+    "MH|5|ambernath|badlapur|kalyan|dombivli|ulhasnagar",
+    "MH|6|kharghar|pen|raigad",
     "MH|7|sindhudurg",
     "MH|8|ratnagiri",
     "MH|9|kolhapur",
@@ -477,7 +461,7 @@ INDIA_RTO_ROWS = [
     "MH|11|satara",
     "MH|12|pune",
     "MH|13|solapur",
-    "MH|14|located pimprichinchwad|outskirts",
+    "MH|14|pimprichinchwad",
     "MH|15|nashik",
     "MH|16|ahmednagar",
     "MH|17|shrirampur",
@@ -491,7 +475,7 @@ INDIA_RTO_ROWS = [
     "MH|26|nanded",
     "MH|27|amravati",
     "MH|28|buldana",
-    "MH|29|yavatmal located nagpur road",
+    "MH|29|yavatmal",
     "MH|30|akola",
     "MH|31|nagpur",
     "MH|32|wardha",
@@ -505,16 +489,15 @@ INDIA_RTO_ROWS = [
     "MH|40|wadi",
     "MH|41|malegaon",
     "MH|42|baramati",
-    "MH|43|navi mumbai located vashi|sanpada",
+    "MH|43|navi mumbai|vashi|sanpada",
     "MH|44|ambejogai",
     "MH|45|akluj",
     "MH|46|panvel",
     "MH|47|borivali|western suburbs from goregaon dahisar",
-    "MH|48|located virar|vasai thane|western suburbs from vasai",
-    "MH|49|located bhandara road",
-    "MH|50|karad|located karad",
+    "MH|48|virar|vasai",
+    "MH|49|bhandara road",
+    "MH|50|karad",
     "ML|1|shillong",
-    "ML|3|owned corporations",
     "ML|4|jaintia hills",
     "ML|5|east khasi hills",
     "ML|6|west khasi hills",
@@ -526,7 +509,6 @@ INDIA_RTO_ROWS = [
     "MN|2|churachandpur",
     "MN|3|kangpokpi",
     "MN|4|thoubal",
-    "MP|2|m.p.",
     "MP|4|bhopal",
     "MP|5|hoshangabad",
     "MP|6|morena",
@@ -546,7 +528,6 @@ INDIA_RTO_ROWS = [
     "MP|20|jabalpur",
     "MP|21|katni",
     "MP|22|seoni",
-    "MP|23|not use",
     "MP|28|chhindwara",
     "MP|30|bhind",
     "MP|31|sheopur",
@@ -557,6 +538,7 @@ INDIA_RTO_ROWS = [
     "MP|36|tikamgarh",
     "MP|37|sehore",
     "MP|38|raisen",
+    "MP|39|Rajgarh",
     "MP|40|vidisha",
     "MP|41|dewas",
     "MP|42|shajapur",
@@ -576,7 +558,7 @@ INDIA_RTO_ROWS = [
     "MP|66|singrauli",
     "MP|67|ashoknagar",
     "MP|68|burhanpur",
-    "MP|69|alirajpur|upcoming",
+    "MP|69|alirajpur",
     "MZ|1|aizawl",
     "MZ|2|lunglei",
     "MZ|3|saiha",
@@ -768,7 +750,6 @@ INDIA_RTO_ROWS = [
     "TN|34|thiruchengode",
     "TN|36|gobichettipalayam",
     "TN|37|coimbatore",
-    "TN|38|north",
     "TN|39|tirupur",
     "TN|40|mettupalayam",
     "TN|41|pollachi",
@@ -800,6 +781,21 @@ INDIA_RTO_ROWS = [
     "TN|76|tenkasi",
     "TN|77|attur",
     "TN|78|dharapuram",
+    "TG|1|adilabad|mancherial|nirmal",
+    "TG|9|hyderabad|khairtabad",
+    "TG|10|secunderabad",
+    "TG|11|malakpet",
+    "TG|12|bahadurpura",
+    "TG|13|mehdipatnam",
+    "TG|14|karimnagar",
+    "TG|15|jagtial|peddapalli",
+    "TG|20|khammam|kothagudem|sathupally|yellandu",
+    "TG|22|gadwal|mahaboobnagar|pebbair",
+    "TG|23|medak|puram|sangareddy|siddipet",
+    "TG|24|bhongir|nalgonda|suryapet",
+    "TG|25|kamareddy|nizamabad",
+    "TG|28|rangareddy",
+    "TG|36|jangaon|mahabubabad|warangal",
     "TR|1|agartala",
     "TR|2|kailashahar",
     "TR|3|udaipura",
@@ -816,8 +812,7 @@ INDIA_RTO_ROWS = [
     "UK|11|chamoli",
     "UK|12|pauri",
     "UK|13|rudraprayag",
-    "UP|1|not longer use",
-    "UP|2|haldwani|not longer use",
+    "UP|2|haldwani",
     "UP|7|dehradun",
     "UP|11|saharanpur",
     "UP|12|muzaffarnagar",
@@ -885,19 +880,12 @@ INDIA_RTO_ROWS = [
     "UP|87|kanshiram nagar",
     "UP|90|banda",
     "UP|92|jalaun",
-    "UP|93|jhansi|jhansi public",
+    "UP|93|jhansi",
     "UP|94|lalitpur",
     "UP|95|mahoba",
     "UP|96|chitrakoot dham|karwi",
-    "WB|1|kolkata|twowheelers",
-    "WB|2|fourwheelers",
-    "WB|3|goods carriages",
-    "WB|4|passenger",
-    "WB|5|cranes|tractors|trailers",
-    "WB|8|kolkata used",
+    "WB|1|kolkata",
     "WB|11|howrah",
-    "WB|13|howrah used",
-    "WB|14|till",
     "WB|15|hooghly",
     "WB|19|alipore|south parganas",
     "WB|23|barrackpore",
@@ -932,6 +920,78 @@ class RtoEntry:
     names: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class RtoCity:
+    """One selectable city name from an RTO row."""
+
+    state_code: str
+    rto_code: str
+    name: str
+    aliases: tuple[str, ...]
+
+
+#: Entries that are not place names at all.
+_JUNK_NAMES = frozenset(
+    {
+        "m.p.",
+        "not use",
+        "not longer use",
+        "upcoming",
+        "see also",
+        "temporary",
+        "till",
+        "south",
+        "north",
+        "east",
+        "west",
+        "central",
+        "astc",
+        "ksrtc",
+        "bmtc autos",
+        "autorikshaws",
+        "twowheelers",
+        "fourwheelers",
+        "goods carriages",
+        "passenger",
+        "cranes",
+        "tractors",
+        "trailers",
+        "owned corporations",
+        "kerala road",
+        "jhansi public",
+        "outskirts",
+        "located",
+    }
+)
+
+_JUNK_FRAGMENTS = (
+    " located ",
+    "does not include",
+    "not longer use",
+    "not use",
+    "upcoming",
+    "trucks",
+    "rickshaws",
+    "see also",
+)
+
+
+def _normalize_name(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _is_junk_name(name: str) -> bool:
+    normalized = _normalize_name(name)
+    if not normalized or normalized in _JUNK_NAMES:
+        return True
+    return any(fragment in normalized for fragment in _JUNK_FRAGMENTS)
+
+
+def display_rto_name(value: str) -> str:
+    """Human-readable title-case form of an RTO name."""
+    return " ".join(value.split()).title()
+
+
 def parse_rto_rows(rows: list[str] | tuple[str, ...]) -> list[RtoEntry]:
     entries: list[RtoEntry] = []
     for row in rows:
@@ -940,8 +1000,18 @@ def parse_rto_rows(rows: list[str] | tuple[str, ...]) -> list[RtoEntry]:
             continue
         state_code = parts[0].strip().upper()
         rto_code = parts[1].strip()
-        names = tuple(name.strip().lower() for name in parts[2:] if name.strip())
-        entries.append(RtoEntry(state_code=state_code, rto_code=rto_code, names=names))
+        names: list[str] = []
+        seen: set[str] = set()
+        for raw_name in parts[2:]:
+            name = _normalize_name(raw_name)
+            if _is_junk_name(name) or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+        if names:
+            entries.append(
+                RtoEntry(state_code=state_code, rto_code=rto_code, names=tuple(names))
+            )
     return entries
 
 
@@ -950,20 +1020,74 @@ RTO_BY_STATE: dict[str, list[RtoEntry]] = {}
 for entry in RTO_ENTRIES:
     RTO_BY_STATE.setdefault(entry.state_code, []).append(entry)
 
+#: Exact normalized city name -> RTO row, scoped by state.
+RTO_NAME_INDEX: dict[tuple[str, str], RtoEntry] = {}
+for entry in RTO_ENTRIES:
+    for name in entry.names:
+        RTO_NAME_INDEX.setdefault((entry.state_code, name), entry)
+
+
+def get_rto_entry(state_code: str, city_name: str) -> RtoEntry | None:
+    """Return the RTO row whose names contain *city_name* exactly."""
+    return RTO_NAME_INDEX.get(
+        (state_code.strip().upper(), _normalize_name(city_name))
+    )
+
+
+def rto_cities_for_state(state_code: str) -> list[RtoCity]:
+    """Every selectable name of a state, one item per alias."""
+    state_code = state_code.strip().upper()
+    cities: list[RtoCity] = []
+    seen: set[str] = set()
+    for entry in RTO_BY_STATE.get(state_code, []):
+        code = normalize_rto_code(entry.rto_code)
+        for name in entry.names:
+            if name in seen:
+                continue
+            seen.add(name)
+            cities.append(
+                RtoCity(
+                    state_code=state_code,
+                    rto_code=code,
+                    name=name,
+                    aliases=tuple(alias for alias in entry.names if alias != name),
+                )
+            )
+    return sorted(cities, key=lambda city: city.name)
+
+
+def _contains_name(haystack: str, name: str) -> bool:
+    """True when *name* occurs as a whole word/phrase within *haystack*."""
+    pattern = rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])"
+    return re.search(pattern, haystack) is not None
+
 
 def get_rto_code(state_code: str, city_name: str) -> str | None:
-    """Find RTO code for a city/name. Returns 2-digit code or None."""
+    """Find RTO code for a city/name. Returns 2-digit code or None.
+
+    Exact alias matches win first. Legacy LGD names such as
+    ``"Municipal Corporation Indore"`` then match on whole-word boundaries.
+    Arbitrary substring matching is deliberately avoided: it mapped
+    ``Prayagraj`` to Agra and ``Kanpur`` to Kanpur Dehat.
+    """
     state_code = state_code.strip().upper()
-    needle = " ".join(city_name.lower().strip().split())
-    for entry in RTO_BY_STATE.get(state_code, []):
-        for name in entry.names:
-            n = " ".join(name.split())
-            if n == needle or needle in n or n in needle:
-                # Return zero-padded to 2 digits
-                try:
-                    return f"{int(entry.rto_code):02d}"
-                except ValueError:
-                    return entry.rto_code.zfill(2)
+    needle = _normalize_name(city_name)
+    if not needle:
+        return None
+
+    entry = get_rto_entry(state_code, city_name)
+    if entry is not None:
+        return normalize_rto_code(entry.rto_code)
+
+    best_entry: RtoEntry | None = None
+    best_length = -1
+    for candidate in RTO_BY_STATE.get(state_code, []):
+        for name in candidate.names:
+            if len(name) > best_length and _contains_name(needle, name):
+                best_entry = candidate
+                best_length = len(name)
+    if best_entry is not None:
+        return normalize_rto_code(best_entry.rto_code)
     return None
 
 

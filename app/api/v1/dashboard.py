@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from sqlalchemy import func, or_, select
 
 from app.core.constants import MemberStatus
+from app.core.redis import redis_client
 from app.core.responses import ok
 from app.dependencies import CurrentUser, DBSession
 from app.models.group import SocialGroup
@@ -31,6 +32,11 @@ async def get_dashboard_statistics(
     - total_cities: Unique cities from active social groups (case-insensitive & whitespace trimmed).
     """
     _ = current_user  # Authentication dependency enforced
+
+    cache_key = "cache:dashboard:statistics"
+    cached = await redis_client.get_json(cache_key)
+    if cached is not None:
+        return ok("Dashboard statistics fetched successfully", cached)
 
     # 1. Total members count (Approved, non-deleted)
     members_subquery = (
@@ -108,4 +114,6 @@ async def get_dashboard_statistics(
         total_cities=row.total_cities or 0,
     )
 
-    return ok("Dashboard statistics fetched successfully", data.model_dump())
+    data_dict = data.model_dump()
+    await redis_client.set_json(cache_key, data_dict, ttl=600)
+    return ok("Dashboard statistics fetched successfully", data_dict)

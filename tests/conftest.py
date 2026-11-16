@@ -167,6 +167,10 @@ def isolated_test_database():
         # Roles and permissions live outside the migrations, so seed them the way the
         # application does at start up.
         asyncio.run(bootstrap_app(async_session_factory))
+        # The bootstrap ran on its own event loop. Drop those pooled connections so
+        # the app (driven by TestClient's portal loop) does not reuse a connection
+        # bound to a closed loop.
+        asyncio.run(engine.dispose())
 
     try:
         yield

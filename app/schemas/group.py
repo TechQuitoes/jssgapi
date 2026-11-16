@@ -144,6 +144,7 @@ class SocialGroupOut(BaseModel):
     # Login accounts assigned to administer this group. Empty for a group that has
     # no Group Admin yet, which is a valid state a SUPER_ADMIN must be able to see.
     admins: list[GroupAdminOut] = []
+    member_count: int = 0
     created_at: datetime
     updated_at: datetime
 

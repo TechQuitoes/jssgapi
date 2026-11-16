@@ -145,6 +145,20 @@ class PaymentStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class GroupObligationStatus(str, Enum):
+    UNPAID = "UNPAID"
+    PARTIAL = "PARTIAL"
+    PAID = "PAID"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    OVERPAID_REVIEW = "OVERPAID_REVIEW"
+
+
+class PaymentWorkflow(str, Enum):
+    SUPER_ADMIN_CHECKOUT = "SUPER_ADMIN_CHECKOUT"
+    GROUP_ADMIN_PAYMENT_LINK = "GROUP_ADMIN_PAYMENT_LINK"
+    MANUAL = "MANUAL"
+
+
 class MediaType(str, Enum):
     IMAGE = "IMAGE"
     VIDEO = "VIDEO"

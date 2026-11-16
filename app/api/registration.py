@@ -3,6 +3,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 from app.core.permissions import Permission
+from app.core.redis import (
+    invalidate_group_cache,
+    invalidate_member_cache,
+)
 from app.core.responses import ok
 from app.dependencies import CurrentUser, DBSession, require_permission
 from app.schemas.registration import (
@@ -36,6 +40,8 @@ async def sync_google_sheet(
     result = await RegistrationSyncService(db).run(
         body, current_user_id=current_user.id
     )
+    if not body.dry_run:
+        await invalidate_member_cache()
     return ok(result.message, result.model_dump())
 
 
@@ -96,6 +102,8 @@ async def sync_google_sheet_photos(
         )
         + ("" if photo_summary.has_more else ".")
     )
+    if not body.dry_run:
+        await invalidate_member_cache()
     return ok(
         message,
         {
@@ -123,4 +131,6 @@ async def sync_google_sheet_groups(
         include_member_data=body.include_member_data,
         link_members=body.link_members,
     )
+    await invalidate_group_cache()
+    await invalidate_member_cache()
     return ok(summary.message, summary.to_dict())

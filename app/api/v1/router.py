@@ -11,6 +11,7 @@ from app.api.v1.events import router as events_router
 from app.api.v1.family import router as family_router
 from app.api.v1.fees import router as fees_router
 from app.api.v1.geo import router as geo_router
+from app.api.v1.group_fees import router as group_fees_router
 from app.api.v1.groups import router as groups_router
 from app.api.v1.jain_tirths import router as jain_tirths_router
 from app.api.v1.locations import router as locations_router
@@ -25,6 +26,7 @@ from app.api.v1.search import router as search_router
 from app.api.v1.translate import router as translate_router
 from app.api.v1.trustees import router as trustees_router
 from app.api.v1.users import router as users_router
+from app.api.v1.webhooks import router as webhooks_router
 
 v1_router = APIRouter()
 
@@ -46,7 +48,9 @@ for resource_router in [
     profile_router,
     advertisements_router,
     fees_router,
+    group_fees_router,
     payments_router,
+    webhooks_router,
     audit_router,
     dashboard_router,
 ]:

@@ -1,12 +1,13 @@
 """Geo master data: endpoints, location validation and import safety.
 
 ``data/geo/*.csv`` (LGD-sourced) seeds ``geo_states`` / ``geo_districts`` /
-``geo_cities``; ``POST /groups`` validates every state/city pair against it
-before minting ``STATE + CITY + SEQUENCE`` Group IDs. These tests pin:
+``geo_cities``; ``POST /groups`` accepts both LGD cities and the RTO names
+exposed by the read endpoints before minting ``STATE + CITY + SEQUENCE`` Group
+IDs. These tests pin:
 
-* the public geo read endpoints (33 RTO States/UTs, RTO-mapped cities, 404s);
-* creation-time rejection of unknown state, unknown city, a city from another
-  state, and an ambiguous city name that exists twice in the same state;
+* the public geo read endpoints (36 RTO States/UTs, RTO city names, 404s);
+* creation-time rejection of unknown state, unknown city, and a city from
+  another state; an LGD-ambiguous name resolves through its RTO alias;
 * an idempotent importer that never rewrites an already-issued prefix
   (``MP09`` Indore, ``MH15`` Nashik) and refuses colliding seed files before
   touching the database.
@@ -158,21 +159,21 @@ def _create(client: TestClient, auth: dict, **place) -> dict:
 # --- geo read endpoints (public) --------------------------------------------
 
 
-def test_all_33_rto_states_and_ut_listed_without_auth(client):
+def test_all_36_rto_states_and_ut_listed_without_auth(client):
     response = client.get("/api/v1/geo/states", params={"page_size": 100})
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["pagination"]["total"] == 33
+    assert body["pagination"]["total"] == 36
     items = body["data"]
     codes = {s["code"] for s in items}
     assert codes == {
-        "AN", "AP", "AR", "AS", "BR", "CG", "DD", "DL", "GA", "GJ", "HP",
-        "HR", "JH", "JK", "KA", "KL", "LD", "MH", "ML", "MN", "MP", "MZ",
-        "NL", "OD", "PB", "PY", "RJ", "SK", "TN", "TR", "UK", "UP", "WB",
+        "AN", "AP", "AR", "AS", "BR", "CG", "CH", "DD", "DL", "GA", "GJ",
+        "HP", "HR", "JH", "JK", "KA", "KL", "LA", "LD", "MH", "ML", "MN",
+        "MP", "MZ", "NL", "OD", "PB", "PY", "RJ", "SK", "TG", "TN", "TR",
+        "UK", "UP", "WB",
     }
-    assert not codes & {"CH", "LA", "TG"}
     ut_codes = {s["code"] for s in items if s["is_union_territory"]}
-    assert ut_codes == {"AN", "DD", "DL", "JK", "LD", "PY"}
+    assert ut_codes == {"AN", "CH", "DD", "DL", "JK", "LA", "LD", "PY"}
     mp = next(s for s in items if s["code"] == "MP")
     assert mp["name"] == "Madhya Pradesh"
     assert mp["lgd_code"] == 23
@@ -187,15 +188,16 @@ def test_state_search_and_union_territory_filter(client):
     assert by_code["pagination"]["total"] == 1
     assert by_code["data"][0]["name"] == "Maharashtra"
 
-    no_chandigarh = client.get(
+    chandigarh = client.get(
         "/api/v1/geo/states", params={"query": "chandigarh"}
     ).json()
-    assert no_chandigarh["pagination"]["total"] == 0
+    assert chandigarh["pagination"]["total"] == 1
+    assert chandigarh["data"][0]["code"] == "CH"
 
     uts = client.get(
         "/api/v1/geo/states", params={"union_territory": True, "page_size": 100}
     ).json()
-    assert uts["pagination"]["total"] == 6
+    assert uts["pagination"]["total"] == 8
 
 
 def test_cities_of_state_by_name_and_by_code(client):
@@ -205,11 +207,12 @@ def test_cities_of_state_by_name_and_by_code(client):
         )
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["pagination"]["total"] == 65
+        assert body["pagination"]["total"] == 50
         indore = next(c for c in body["data"] if c["name"] == "Indore")
         assert indore["prefix"] == "MP09"
         assert indore["city_code"] == "09"
-        assert indore["district_name"] == "Indore"
+        assert indore["source"] == "rto"
+        assert indore["lgd_code"] is None
         assert all(
             c["city_code"].isdigit()
             and len(c["city_code"]) == 2
@@ -219,24 +222,64 @@ def test_cities_of_state_by_name_and_by_code(client):
         assert "Churhat" not in {c["name"] for c in body["data"]}
 
 
-def test_delhi_overrides_and_empty_lakshadweep(client):
+def test_delhi_rto_cities_and_lakshadweep(client):
     delhi = client.get(
         "/api/v1/geo/states/DL/cities", params={"page_size": 200}
     )
     assert delhi.status_code == 200, delhi.text
     body = delhi.json()
-    assert body["pagination"]["total"] == 4
+    assert body["pagination"]["total"] == 25
     by_name = {c["name"]: c for c in body["data"]}
-    assert by_name["East Delhi Municipal Corporation"]["prefix"] == "DL07"
-    assert by_name["North Delhi Municipal Corporation"]["prefix"] == "DL06"
-    assert by_name["South Delhi Municipal Corporation"]["prefix"] == "DL03"
-    assert by_name["New Delhi Municipal Council"]["prefix"] == "DL02"
+    assert by_name["East Delhi"]["prefix"] == "DL07"
+    assert by_name["Central Delhi"]["prefix"] == "DL06"
+    assert by_name["South Delhi"]["prefix"] == "DL03"
+    assert by_name["New Delhi"]["prefix"] == "DL02"
 
     lakshadweep = client.get(
         "/api/v1/geo/states/LD/cities", params={"page_size": 200}
     )
     assert lakshadweep.status_code == 200, lakshadweep.text
-    assert lakshadweep.json()["pagination"]["total"] == 0
+    assert lakshadweep.json()["pagination"]["total"] == 1
+    assert lakshadweep.json()["data"][0]["name"] == "Kavaratti"
+
+
+def test_telangana_chandigarh_and_ladakh_cities(client):
+    expected = {
+        "TG": {"Hyderabad": "TG09", "Warangal": "TG36", "Mancherial": "TG01"},
+        "CH": {"Chandigarh": "CH01"},
+        "LA": {"Leh": "LA01", "Kargil": "LA02"},
+    }
+    for state, names in expected.items():
+        response = client.get(
+            f"/api/v1/geo/states/{state}/cities", params={"page_size": 200}
+        )
+        assert response.status_code == 200, response.text
+        by_name = {c["name"]: c for c in response.json()["data"]}
+        for name, prefix in names.items():
+            assert name in by_name, (state, name)
+            assert by_name[name]["prefix"] == prefix
+
+    ap = client.get(
+        "/api/v1/geo/states/AP/cities", params={"page_size": 200}
+    ).json()
+    assert "Hyderabad" not in {c["name"] for c in ap["data"]}
+
+
+def test_every_rto_alias_is_its_own_city_and_junk_is_filtered(client):
+    tg = client.get(
+        "/api/v1/geo/states/TG/cities", params={"page_size": 200}
+    ).json()
+    by_name = {c["name"]: c for c in tg["data"]}
+    for name in ("Adilabad", "Mancherial", "Nirmal"):
+        assert name in by_name
+        assert by_name[name]["prefix"] == "TG01"
+
+    wb = client.get(
+        "/api/v1/geo/states/WB/cities", params={"page_size": 200}
+    ).json()
+    wb_names = {c["name"] for c in wb["data"]}
+    assert {"Kolkata", "Howrah", "Hooghly"} <= wb_names
+    assert not wb_names & {"Trucks", "Goods Carriages", "Passenger", "Till"}
 
 
 def test_city_detail_and_404s(client):
@@ -249,8 +292,12 @@ def test_city_detail_and_404s(client):
     assert client.get("/api/v1/geo/states/MP/cities/999999").status_code == 404
     assert client.get("/api/v1/geo/states/Kalinga/cities").status_code == 404
     assert client.get("/api/v1/geo/states/%20%20/cities").status_code == 404
-    assert client.get("/api/v1/geo/states/CH/cities").status_code == 404
-    assert client.get("/api/v1/geo/states/TG/cities").status_code == 404
+
+    rto_city = client.get("/api/v1/geo/states/TG/cities/rto/09")
+    assert rto_city.status_code == 200, rto_city.text
+    names = {c["name"] for c in rto_city.json()["data"]}
+    assert names == {"Hyderabad", "Khairtabad"}
+    assert client.get("/api/v1/geo/states/TG/cities/rto/999").status_code == 404
 
 
 async def test_delhi_api_prefix_matches_group_id_resolution():
@@ -298,19 +345,11 @@ def test_chandigarh_city_requires_chandigarh_state(client, auth):
     assert group["city"] == "Chandigarh"
 
 
-def test_ambiguous_city_name_is_rejected(client, auth):
-    """The LGD has two Itanagar ULBs, so the name alone cannot pick one."""
-    response = client.post(
-        "/api/v1/groups",
-        json={
-            "name": f"Ambiguous {uuid4().hex[:8]}",
-            "state": "Arunachal Pradesh",
-            "city": "Itanagar",
-        },
-        headers=auth,
-    )
-    assert response.status_code == 422, response.text
-    assert "ambiguous" in response.json()["message"].lower()
+def test_ambiguous_lgd_city_resolves_through_rto_name(client, auth):
+    """The LGD has two Itanagar ULBs, but the RTO row provides one code."""
+    group = _create(client, auth, state="Arunachal Pradesh", city="Itanagar")
+    assert group["group_id"].startswith("AR01")
+    assert group["city"] == "Itanagar"
 
 
 def test_two_letter_state_code_is_accepted(client, auth):
@@ -318,6 +357,27 @@ def test_two_letter_state_code_is_accepted(client, auth):
     assert group["group_id"].startswith("MP09")
     assert group["state"] == "Madhya Pradesh"
     assert group["city"] == "Indore"
+
+
+def test_rto_city_alias_can_create_a_group(client, auth):
+    telangana = _create(client, auth, state="Telangana", city="Mancherial")
+    assert telangana["group_id"].startswith("TG01")
+    assert telangana["city"] == "Mancherial"
+
+    ladakh = _create(client, auth, state="Ladakh", city="Kargil")
+    assert ladakh["group_id"].startswith("LA02")
+    assert ladakh["city"] == "Kargil"
+
+
+async def test_rto_matching_avoids_substring_false_positives():
+    async with _isolated_session() as session:
+        kanpur = await resolve_city(session, "Uttar Pradesh", "Kanpur")
+        prayagraj = await resolve_city(session, "Uttar Pradesh", "Prayagraj")
+
+    assert kanpur.city_code == "78"
+    assert kanpur.source == "rto"
+    # "prayagraj" contains "agra" as a substring, but not as a word.
+    assert prayagraj.source == "lgd"
 
 
 def test_unknown_city_is_rejected(client, auth):

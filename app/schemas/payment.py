@@ -17,8 +17,12 @@ class PaymentCreate(BaseModel):
 
 
 class PaymentVerifyRequest(BaseModel):
-    provider_reference: str
-    status: PaymentStatus = PaymentStatus.SUCCESS
+    """Payload sent by the Flutter app after Razorpay Checkout completes."""
+
+    payment_id: UUID | None = None
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
 
 
 class PaymentTransactionOut(BaseModel):
@@ -50,3 +54,19 @@ class PaymentOut(BaseModel):
     transactions: list[PaymentTransactionOut] = []
     created_at: datetime
     updated_at: datetime
+
+
+class PaymentCreateResponse(BaseModel):
+    """Returned to the Flutter app so it can launch Razorpay Checkout."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    order_id: str
+    razorpay_order_id: str
+    razorpay_key_id: str
+    amount: Decimal
+    currency: str
+    status: str
+    provider: str
+    created_at: datetime

@@ -19,6 +19,9 @@ from app.models.group import (  # noqa: F401
     MemberIdCounter,
     SocialGroup,
 )
+from app.models.group_payment_obligation import (  # noqa: F401
+    GroupPaymentObligation,
+)
 from app.models.jain_tirth import JainTirth  # noqa: F401
 from app.models.jain_tirth_image import JainTirthImage  # noqa: F401
 from app.models.location import Location  # noqa: F401
@@ -35,3 +38,5 @@ from app.models.payment import Payment, PaymentTransaction  # noqa: F401
 from app.models.professional import ProfessionalInformation  # noqa: F401
 from app.models.trustee import Trustee  # noqa: F401
 from app.models.user import Permission, Role, RolePermission, User  # noqa: F401
+from app.models.webhook_event import WebhookEvent  # noqa: F401
+

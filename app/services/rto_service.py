@@ -24,28 +24,46 @@ DELHI_RTO_OVERRIDES: dict[int, str] = {
 
 
 STATE_NAME_TO_CODE: dict[str, str] = {
-    "madhya pradesh": "MP",
-    "rajasthan": "RJ",
-    "gujarat": "GJ",
-    "maharashtra": "MH",
+    "jammu and kashmir": "JK",
+    "himachal pradesh": "HP",
+    "punjab": "PB",
+    "chandigarh": "CH",
+    "uttarakhand": "UK",
+    "haryana": "HR",
     "delhi": "DL",
+    "rajasthan": "RJ",
     "uttar pradesh": "UP",
     "bihar": "BR",
-    "punjab": "PB",
-    "haryana": "HR",
-    "karnataka": "KA",
-    "tamil nadu": "TN",
-    "west bengal": "WB",
-    "andhra pradesh": "AP",
-    "telangana": "TS",
-    "kerala": "KL",
-    "odisha": "OD",
+    "sikkim": "SK",
+    "arunachal pradesh": "AR",
+    "nagaland": "NL",
+    "manipur": "MN",
+    "mizoram": "MZ",
+    "tripura": "TR",
+    "meghalaya": "ML",
     "assam": "AS",
-    "chhattisgarh": "CG",
+    "west bengal": "WB",
     "jharkhand": "JH",
-    "uttarakhand": "UK",
-    "himachal pradesh": "HP",
+    "odisha": "OD",
+    "chhattisgarh": "CG",
+    "madhya pradesh": "MP",
+    "gujarat": "GJ",
+    "maharashtra": "MH",
+    "andhra pradesh": "AP",
+    "karnataka": "KA",
     "goa": "GA",
+    "lakshadweep": "LD",
+    "kerala": "KL",
+    "tamil nadu": "TN",
+    "puducherry": "PY",
+    "andaman and nicobar islands": "AN",
+    "telangana": "TG",
+    "ladakh": "LA",
+    "the dadra and nagar haveli and daman and diu": "DD",
+}
+
+STATE_CODE_ALIASES: dict[str, str] = {
+    "TS": "TG",
 }
 
 STATE_DISTRICT_RTO_MAP: dict[tuple[str, str], tuple[str, str]] = {
@@ -114,6 +132,7 @@ def get_state_district_code(state: str, city: str) -> tuple[str, str]:
             else:
                 state_code = "MP"
 
+    state_code = STATE_CODE_ALIASES.get(state_code, state_code)
     rto = rto_code_for_city(state_code, city)
     if rto:
         return state_code, rto.zfill(2)
@@ -132,6 +151,7 @@ def rto_code_for_city(
     overrides before falling back to the normal name-based lookup.
     """
     state_code = state_code.strip().upper()
+    state_code = STATE_CODE_ALIASES.get(state_code, state_code)
     if state_code == "DL" and lgd_code is not None:
         override = DELHI_RTO_OVERRIDES.get(lgd_code)
         if override is not None:

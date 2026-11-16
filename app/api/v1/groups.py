@@ -24,6 +24,11 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.permissions import Permission
+from app.core.redis import (
+    invalidate_group_cache,
+    invalidate_member_cache,
+    redis_client,
+)
 from app.core.responses import created, ok, paginated
 from app.core.scope import (
     assert_group_access,
@@ -201,6 +206,21 @@ async def _assign_default_group_admin(
     return user
 
 
+async def _serialize_groups_with_counts(
+    repo: GroupRepository, groups: list[SocialGroup]
+) -> list[dict[str, Any]]:
+    """Serialize groups to JSON-compatible dicts with member counts aggregated in a single query."""
+    if not groups:
+        return []
+    counts_map = await repo.get_member_counts([g.id for g in groups])
+    serialized: list[dict[str, Any]] = []
+    for g in groups:
+        out = SocialGroupOut.model_validate(g)
+        out.member_count = counts_map.get(g.id, 0)
+        serialized.append(out.model_dump(mode="json"))
+    return serialized
+
+
 @router.get("")
 async def list_groups(
     db: DBSession,
@@ -230,6 +250,15 @@ async def list_groups(
     an authenticated GROUP_ADMIN calls it, the database source still shows only
     its own group.
     """
+    # Picker's option list or paged resource.
+    cache_key = (
+        f"cache:groups:src:{source}:field:{field or 'all'}:status:{status or 'all'}:"
+        f"q:{query or 'all'}:page:{page}:size:{page_size}"
+    )
+    cached = await redis_client.get_json(cache_key)
+    if cached is not None:
+        return cached
+
     if source == "sheets":
         # Reading the sheet is a network call on Google's side, so it runs in a
         # worker thread instead of blocking the event loop.
@@ -239,17 +268,11 @@ async def list_groups(
         if query:
             needle = query.strip().casefold()
             sheet_items = [i for i in sheet_items if needle in i["name"].casefold()]
-        return ok("Groups fetched successfully", sheet_items)
+        res = ok("Groups fetched successfully", sheet_items)
+        await redis_client.set_json(cache_key, res, ttl=900)
+        return res
 
     repo = GroupRepository(db)
-
-    # OLD SCOPE RESTRICTION (commented out - restored if needed):
-    # Anonymous callers see every group. An authenticated GROUP_ADMIN sees only
-    # their own group; without this, the search box would leak the rest.
-    # visible_group = None
-    # if current_user is not None:
-    #     scope = await get_access_scope(db, current_user)
-    #     visible_group = None if scope.unrestricted else scope.group_id
 
     # All authenticated roles (Group Admin, Member, Super Admin) see all groups.
     # Only restrict by explicit query param if provided.
@@ -261,10 +284,13 @@ async def list_groups(
             limit=page_size,
             offset=(page - 1) * page_size,
         )
-        return ok(
+        serialized_groups = await _serialize_groups_with_counts(repo, groups)
+        res = ok(
             "Groups fetched successfully",
-            [SocialGroupOut.model_validate(g) for g in groups],
+            serialized_groups,
         )
+        await redis_client.set_json(cache_key, res, ttl=900)
+        return res
     # A deleted group is soft-deleted (`is_deleted=True`); keep it out of the
     # listing so the panel's group directory reflects the deletion.
     stmt = select(SocialGroup).where(SocialGroup.is_deleted.is_(False))
@@ -281,9 +307,10 @@ async def list_groups(
         stmt.order_by(SocialGroup.name).limit(page_size).offset((page - 1) * page_size)
     )
     items = list(result.scalars().all())
-    return paginated(
+    serialized_items = await _serialize_groups_with_counts(repo, items)
+    res = paginated(
         "Groups fetched successfully",
-        [SocialGroupOut.model_validate(i) for i in items],
+        serialized_items,
         {
             "page": page,
             "page_size": page_size,
@@ -291,6 +318,8 @@ async def list_groups(
             "total_pages": (total + page_size - 1) // page_size,
         },
     )
+    await redis_client.set_json(cache_key, res, ttl=900)
+    return res
 
 
 @router.post("", dependencies=[CREATE])
@@ -372,6 +401,7 @@ async def create_group(body: SocialGroupCreate, db: DBSession):
         raise
     if body.admin_name is not None:
         await db.refresh(group, ["admins"])
+    await invalidate_group_cache()
     return created("Group created successfully", SocialGroupOut.model_validate(group))
 
 
@@ -389,13 +419,17 @@ def _is_group_id_violation(exc: IntegrityError) -> bool:
 
 @router.get("/{group_id}", dependencies=[READ])
 async def get_group(group_id: UUID, db: DBSession, current_user: CurrentUser):
-    group = await GroupRepository(db).get_by_id(group_id)
+    repo = GroupRepository(db)
+    group = await repo.get_by_id(group_id)
     if group is None:
         raise NotFoundException("Group", str(group_id))
     scope = await get_access_scope(db, current_user)
     if not scope.unrestricted and scope.group_id != group_id:
         raise NotFoundException("Group", str(group_id))
-    return ok("Group fetched successfully", SocialGroupOut.model_validate(group))
+    counts = await repo.get_member_counts([group.id])
+    out = SocialGroupOut.model_validate(group)
+    out.member_count = counts.get(group.id, 0)
+    return ok("Group fetched successfully", out)
 
 
 @router.get("/{group_id}/members", dependencies=[READ])
@@ -657,6 +691,8 @@ async def assign_group_admin(group_id: UUID, body: GroupAdminAssignment, db: DBS
         entity_id=user.id,
         details={"role": role.name, "group_id": str(group_id)},
     )
+    await invalidate_group_cache()
+    await invalidate_member_cache()
     return ok(
         "Group Admin assigned successfully",
         {
@@ -693,6 +729,8 @@ async def remove_group_admin(group_id: UUID, user_id: UUID, db: DBSession):
         entity_id=user.id,
         details={"role": RoleName.MEMBER.value, "removed_from_group": str(group_id)},
     )
+    await invalidate_group_cache()
+    await invalidate_member_cache()
     return ok("Group Admin removed successfully", GroupAdminOut.model_validate(user))
 
 
@@ -754,6 +792,8 @@ async def add_group_member(
         entity_id=member.id,
         details={"group_id": str(group_id), "action": "member_added"},
     )
+    await invalidate_group_cache()
+    await invalidate_member_cache()
     return created("Member added to group", _group_member_out(member, group_id=group_id))
 
 
@@ -783,6 +823,8 @@ async def remove_group_member(
         entity_id=member.id,
         details={"group_id": str(group_id), "action": "member_removed"},
     )
+    await invalidate_group_cache()
+    await invalidate_member_cache()
     return ok("Member removed from group")
 
 
@@ -811,6 +853,7 @@ async def update_group(
         AuditAction.GROUP_UPDATE, entity_type="group", entity_id=group.id
     )
     await db.flush()
+    await invalidate_group_cache()
     return ok("Group updated successfully", SocialGroupOut.model_validate(group))
 
 
@@ -856,4 +899,6 @@ async def delete_group(
         entity_id=group_id_value,
         details={"hard_delete": True, "force": force, "unlinked": blocking},
     )
+    await invalidate_group_cache()
+    await invalidate_member_cache()
     return ok("Group deleted successfully")

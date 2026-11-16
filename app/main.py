@@ -4,6 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -12,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from app.api.router import api_router
 from app.config import get_settings
 from app.core.exceptions import AppException
+from app.core.redis import redis_client
 from app.core.responses import error_response
 from app.database import async_session_factory
 from app.services.bootstrap_service import bootstrap_app
@@ -26,8 +28,18 @@ async def lifespan(app: FastAPI):
     # Reported before anything else so a bad Cloudflare R2 setting is visible at
     # boot instead of only as a signature error on the first media read.
     logger.info("media storage backend: %s", validate_storage_configuration())
+    await redis_client.init(
+        redis_url=settings.redis_url,
+        enabled=settings.redis_enabled,
+        provider=settings.redis_provider,
+        upstash_url=settings.upstash_redis_rest_url,
+        upstash_token=settings.upstash_redis_rest_token,
+    )
     await bootstrap_app(async_session_factory)
-    yield
+    try:
+        yield
+    finally:
+        await redis_client.close()
 
 
 app = FastAPI(
@@ -146,7 +158,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={
             "success": False,
             "message": user_msg,
-            "detail": errors,
+            "detail": jsonable_encoder(errors, custom_encoder={Exception: str}),
             "error_code": "VALIDATION_ERROR",
         },
     )

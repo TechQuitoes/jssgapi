@@ -83,6 +83,10 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
+    redis_enabled: bool = True
+    redis_provider: Literal["local", "redis", "upstash"] = "local"
+    upstash_redis_rest_url: str | None = None
+    upstash_redis_rest_token: str | None = None
 
     # OTP login
     otp_length: int = 6
@@ -203,6 +207,12 @@ class Settings(BaseSettings):
     payment_key: str = ""
     payment_secret: str = ""
     payment_webhook_secret: str = ""
+
+    # Razorpay
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    razorpay_webhook_secret: str = ""
+    group_member_rate: float = 100.0
 
     # CORS
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
