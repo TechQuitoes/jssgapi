@@ -22,6 +22,11 @@ from app.schemas.group_payment import (
     PaymentSummaryOut,
 )
 from app.schemas.payment import (
+    ContributionHistoryItem,
+    ContributionOrderRequest,
+    ContributionOrderResponse,
+    ContributionVerifyRequest,
+    ContributionVerifyResponse,
     PaymentCreate,
     PaymentCreateResponse,
     PaymentOut,
@@ -204,6 +209,71 @@ async def create_group_fee_order(
         user_agent=request.headers.get("user-agent"),
     )
     return created("Payment order created successfully", result)
+
+
+@router.post("/contributions/order", status_code=201)
+async def create_contribution_order(
+    body: ContributionOrderRequest,
+    current_user: CurrentUser,
+    db: DBSession,
+    request: Request,
+):
+    """Create a Razorpay order for voluntary contribution/donation.
+
+    Open to all authenticated users (members, group admins, super admins).
+    Accepts any custom amount. No group obligation lock.
+    """
+    service = PaymentService(db)
+    result = await service.create_contribution_order(
+        amount=body.amount,
+        user=current_user,
+        group_id=body.group_id,
+        event_id=body.event_id,
+        purpose=body.purpose,
+        notes=body.notes,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return created("Contribution order created successfully", result)
+
+
+@router.post("/contributions/verify")
+async def verify_contribution_payment(
+    body: ContributionVerifyRequest,
+    current_user: CurrentUser,
+    db: DBSession,
+    request: Request,
+):
+    """Verify Razorpay payment signature for voluntary contribution."""
+    service = PaymentService(db)
+    result = await service.verify_contribution_payment(
+        razorpay_order_id=body.razorpay_order_id,
+        razorpay_payment_id=body.razorpay_payment_id,
+        razorpay_signature=body.razorpay_signature,
+        payment_id=body.payment_id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return ok("Contribution payment verified successfully", result)
+
+
+@router.get("/contributions")
+async def list_contributions(
+    current_user: CurrentUser,
+    db: DBSession,
+    group_id: UUID | None = Query(default=None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """List successful voluntary contributions."""
+    service = PaymentService(db)
+    items, pagination = await service.list_contributions(
+        user=current_user,
+        group_id=group_id,
+        page=page,
+        page_size=page_size,
+    )
+    return paginated("Contributions fetched successfully", items, pagination)
 
 
 @router.post("")

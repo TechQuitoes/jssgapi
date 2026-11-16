@@ -1482,174 +1482,94 @@ class PaymentService:
         await self.session.refresh(payment)
         return payment
 
-    # ── Flutter Group Fee Payment Flow ────────────────────────────────────
+    # ── Voluntary Contribution / Donation Flow ────────────────────────────
 
-    async def get_group_fee_status(
-        self,
-        group_id: uuid.UUID,
-        user: Any,
-        billing_period: str | None = None,
-    ) -> dict[str, Any]:
-        """Fetch group fee status & calculation for the Flutter app.
-
-        Returns fee breakdown (members × rate), payment status, and whether
-        the current authenticated user is an admin of this group.
-        """
-        from app.core.constants import RoleName, resolve_role_name
-        from app.schemas.group_fee import GroupFeeStatusResponse
-
-        period = billing_period or financial_year_for()
-
-        # Fetch group
-        group = await self.groups.get_by_id(group_id)
-        if group is None:
-            raise NotFoundException("Group", str(group_id))
-
-        # Determine if user is an admin of this specific group
-        is_admin = False
-        if user and user.role:
-            role = resolve_role_name(user.role.name)
-            if role == RoleName.SUPER_ADMIN:
-                is_admin = True
-            elif role == RoleName.GROUP_ADMIN and user.group_id == group_id:
-                is_admin = True
-
-        # Get or create the obligation (contains member count, rate, amounts)
-        obligation = await self.get_or_create_group_obligation(group_id, period)
-
-        # Try to find the fee record for this group and period
-        fee_result = await self.session.execute(
-            select(Fee).where(
-                Fee.group_id == group_id,
-                Fee.financial_year == period,
-                Fee.is_deleted.is_(False),
-            ).order_by(Fee.due_date.desc()).limit(1)
-        )
-        fee = fee_result.scalar_one_or_none()
-
-        # Map obligation status to a simpler fee status for the app
-        status_map = {
-            GroupObligationStatus.UNPAID.value: "PENDING",
-            GroupObligationStatus.PARTIAL.value: "PENDING",
-            GroupObligationStatus.PAID.value: "PAID",
-            GroupObligationStatus.NOT_APPLICABLE.value: "PAID",
-            GroupObligationStatus.OVERPAID_REVIEW.value: "PAID",
-        }
-        fee_status = status_map.get(obligation.status, "PENDING")
-
-        # If fee exists and has a due date, check for overdue
-        due_date_str: str | None = None
-        if fee and fee.due_date:
-            due_date_str = format_to_dd_mm_yyyy(fee.due_date)
-            from datetime import date as date_type
-            if fee_status == "PENDING" and fee.due_date < date_type.today():
-                fee_status = "OVERDUE"
-
-        response = GroupFeeStatusResponse(
-            fee_id=fee.id if fee else None,
-            obligation_id=obligation.id,
-            group_id=group_id,
-            group_name=group.name,
-            financial_year=period,
-            fee_per_member=float(obligation.rate_per_member),
-            active_member_count=obligation.member_count_snapshot,
-            total_amount=float(obligation.expected_amount),
-            collected_amount=float(obligation.collected_amount),
-            pending_amount=float(obligation.pending_amount),
-            due_date=due_date_str,
-            status=fee_status,
-            is_admin=is_admin,
-            currency="INR",
-        )
-        return response.model_dump(mode="json")
-
-    async def create_group_fee_order(
+    async def create_contribution_order(
         self,
         *,
-        group_id: uuid.UUID,
-        fee_id: uuid.UUID | None = None,
+        amount: Decimal,
         user: Any,
+        group_id: uuid.UUID | None = None,
+        event_id: uuid.UUID | None = None,
+        purpose: str | None = None,
+        notes: str | None = None,
         ip_address: str | None = None,
         user_agent: str | None = None,
     ) -> dict[str, Any]:
-        """Create a Razorpay order for group fee payment (Flutter app flow).
+        """Create a Razorpay order for voluntary contribution (no obligation lock).
 
-        Security invariants:
-        - Only verified Group Admins of this specific group (or Super Admin) can create orders.
-        - Amount is ALWAYS calculated server-side (never from client).
-        - Only razorpay_key_id (public key) is returned, never the secret.
+        Anyone (MEMBER, GROUP_ADMIN, SUPER_ADMIN) can contribute any custom amount,
+        multiple times, without being blocked by previous payments.
         """
-        from app.core.constants import RoleName, resolve_role_name
-        from app.schemas.group_fee import GroupFeeOrderResponse
+        from app.schemas.payment import ContributionOrderResponse
 
-        # 1. Verify admin access
-        if not user or not user.role:
+        if not user:
             raise ForbiddenException("Authentication required")
-        role = resolve_role_name(user.role.name)
-        if role == RoleName.GROUP_ADMIN:
-            if user.group_id != group_id:
-                raise ForbiddenException("You are not an admin of this group")
-        elif role != RoleName.SUPER_ADMIN:
-            raise ForbiddenException("Only Group Admins or Super Admins can initiate payments")
 
-        period = financial_year_for()
+        if amount <= Decimal("0"):
+            raise BadRequestException("Contribution amount must be greater than 0")
 
-        # 2. Get or create obligation & lock
-        obligation = await self.get_or_create_group_obligation(group_id, period)
-        locked = await self.obligations.get_by_id_for_update(obligation.id)
-        if locked is None:
-            raise NotFoundException("GroupPaymentObligation", str(obligation.id))
+        # Optional group check
+        effective_group_id = group_id or getattr(user, "group_id", None)
+        if effective_group_id is not None:
+            grp = await self.groups.get_by_id(effective_group_id)
+            if grp is None:
+                if group_id is not None:
+                    raise NotFoundException("Group", str(group_id))
+                effective_group_id = None
 
-        # 3. Verify fee is not already PAID
-        if locked.status == GroupObligationStatus.PAID.value or locked.pending_amount <= 0:
-            raise BadRequestException("Fee is already PAID for this group and period")
+        # Optional member check (link if this user has an associated member profile)
+        member_id: uuid.UUID | None = None
+        if hasattr(user, "member") and user.member:
+            member_id = user.member.id
+        elif hasattr(user, "id") and user.id:
+            member_stmt = select(Member.id).where(Member.user_id == user.id).limit(1)
+            member_res = await self.session.execute(member_stmt)
+            member_id = member_res.scalar_one_or_none()
 
-        if locked.status == GroupObligationStatus.NOT_APPLICABLE.value:
-            raise BadRequestException("Group has 0 eligible members; no fee to pay")
+        receipt = f"cnt_{uuid.uuid4().hex[:14]}"
+        amount_in_paise = int(amount * 100)
 
-        # 4. Re-calculate total amount server-side
-        counts_map = await self.groups.get_eligible_member_counts([group_id])
-        member_count = counts_map.get(group_id, 0)
-        rate = Decimal(str(settings.group_member_rate or 100.00))
-        total_amount = Decimal(member_count) * rate
-        amount_to_pay = min(total_amount, Decimal(str(locked.pending_amount)))
-
-        if amount_to_pay <= 0:
-            raise BadRequestException("No outstanding amount to pay")
-
-        # 5. Convert to paise
-        amount_in_paise = int(amount_to_pay * 100)
-
-        # 6. Create Razorpay order
-        receipt = f"fee_{group_id}_{period}"
-        notes = {
-            "group_id": str(group_id),
-            "obligation_id": str(locked.id),
-            "workflow": PaymentWorkflow.GROUP_ADMIN_PAYMENT_LINK.value,
+        order_notes = {
+            "workflow": PaymentWorkflow.MEMBER_CONTRIBUTION.value,
+            "user_id": str(user.id),
+            "purpose": (purpose or "General Contribution")[:100],
         }
-        if fee_id:
-            notes["fee_id"] = str(fee_id)
+        if effective_group_id:
+            order_notes["group_id"] = str(effective_group_id)
+        if event_id:
+            order_notes["event_id"] = str(event_id)
 
         razorpay_order = create_razorpay_order(
-            amount=amount_to_pay,
+            amount=amount,
             currency="INR",
             receipt=receipt,
-            notes=notes,
+            notes=order_notes,
         )
         razorpay_order_id = razorpay_order["id"]
 
-        # 7. Create payment record
+        metadata = {
+            "razorpay_order": razorpay_order,
+            "purpose": purpose,
+            "notes": notes,
+            "event_id": str(event_id) if event_id else None,
+            "donor_user_id": str(user.id),
+            "donor_name": getattr(user, "full_name", None),
+            "donor_phone": getattr(user, "phone_number", None),
+        }
+
         payment = await self.payments.create(
-            group_id=group_id,
-            obligation_id=locked.id,
-            fee_id=fee_id,
+            member_id=member_id,
+            group_id=effective_group_id,
+            obligation_id=None,
+            fee_id=None,
             order_id=razorpay_order_id,
-            amount=amount_to_pay,
+            amount=amount,
             currency="INR",
             status=PaymentStatus.PENDING.value,
             provider="razorpay",
-            workflow=PaymentWorkflow.GROUP_ADMIN_PAYMENT_LINK.value,
-            provider_metadata=json.dumps(razorpay_order),
+            workflow=PaymentWorkflow.MEMBER_CONTRIBUTION.value,
+            provider_metadata=json.dumps(metadata),
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
         )
 
@@ -1657,10 +1577,9 @@ class PaymentService:
             payment,
             transaction_type="ORDER_CREATED",
             status=PaymentStatus.PENDING.value,
-            group_id=group_id,
-            obligation_id=locked.id,
+            group_id=effective_group_id,
             razorpay_order_id=razorpay_order_id,
-            amount=amount_to_pay,
+            amount=amount,
             payment_method="checkout",
         )
 
@@ -1670,28 +1589,29 @@ class PaymentService:
             entity_id=payment.id,
             details={
                 "order_id": razorpay_order_id,
-                "group_id": str(group_id),
-                "obligation_id": str(locked.id),
-                "amount": str(amount_to_pay),
-                "workflow": "GROUP_ADMIN_FLUTTER_CHECKOUT",
+                "amount": str(amount),
+                "workflow": PaymentWorkflow.MEMBER_CONTRIBUTION.value,
+                "purpose": purpose,
             },
             ip_address=ip_address,
             user_agent=user_agent,
         )
         await self.session.flush()
 
-        response = GroupFeeOrderResponse(
+        response = ContributionOrderResponse(
             payment_id=payment.id,
+            order_id=payment.order_id,
             razorpay_order_id=razorpay_order_id,
-            amount=amount_in_paise,
-            currency="INR",
             razorpay_key_id=settings.razorpay_key_id,
-            group_id=group_id,
-            group_name=locked.group_name,
+            amount=amount_in_paise,
+            amount_in_rupees=amount,
+            currency="INR",
+            group_id=effective_group_id,
+            purpose=purpose,
         )
         return response.model_dump(mode="json")
 
-    async def verify_group_fee_payment(
+    async def verify_contribution_payment(
         self,
         *,
         razorpay_order_id: str,
@@ -1701,14 +1621,10 @@ class PaymentService:
         ip_address: str | None = None,
         user_agent: str | None = None,
     ) -> dict[str, Any]:
-        """Verify Razorpay payment signature for group fee payment (Flutter app flow).
+        """Verify Razorpay payment signature for voluntary contribution."""
+        from app.schemas.payment import ContributionVerifyResponse
 
-        Security: Verifies HMAC-SHA256 signature using the server-side key secret.
-        On success, updates payment + obligation ledger + fee record.
-        """
-        from app.schemas.group_fee import GroupFeeVerifyResponse
-
-        # 1. Verify cryptographic signature
+        # 1. Verify HMAC-SHA256 signature
         is_valid = verify_razorpay_payment_signature(
             razorpay_order_id=razorpay_order_id,
             razorpay_payment_id=razorpay_payment_id,
@@ -1716,26 +1632,41 @@ class PaymentService:
         )
         if not is_valid:
             logger.warning(
-                "Invalid payment signature for order=%s payment=%s",
+                "Invalid payment signature for contribution order=%s payment=%s",
                 razorpay_order_id,
                 razorpay_payment_id,
             )
             raise BadRequestException("Invalid payment signature")
 
-        # 2. Find payment by order_id (or payment_id)
+        # 2. Find payment by order_id or payment_id
         payment = await self.payments.get_by_order_id(razorpay_order_id)
         if payment is None and payment_id:
             payment = await self.payments.get_by_id(payment_id)
         if payment is None:
             raise NotFoundException("Payment", razorpay_order_id)
 
-        # 3. Idempotency: if already verified, return success
+        # Extract metadata
+        purpose = None
+        donor_name = None
+        if payment.provider_metadata:
+            try:
+                meta = json.loads(payment.provider_metadata)
+                purpose = meta.get("purpose")
+                donor_name = meta.get("donor_name")
+            except Exception:
+                pass
+
+        # 3. Idempotency check: if already success, return immediately
         if payment.status == PaymentStatus.SUCCESS.value:
-            response = GroupFeeVerifyResponse(
+            response = ContributionVerifyResponse(
                 status="SUCCESS",
-                message="Payment already verified",
+                message="Contribution already verified",
                 transaction_id=payment.provider_reference or razorpay_payment_id,
+                amount=payment.amount,
+                currency=payment.currency,
                 paid_at=payment.paid_at,
+                purpose=purpose,
+                donor_name=donor_name,
                 receipt_url=None,
             )
             return response.model_dump(mode="json")
@@ -1743,7 +1674,7 @@ class PaymentService:
         if payment.status != PaymentStatus.PENDING.value:
             raise BadRequestException(f"Cannot verify a {payment.status} payment")
 
-        # 4. Server-side verification with Razorpay API
+        # 4. Gateway check
         rz_payment = fetch_razorpay_payment(razorpay_payment_id)
         if rz_payment.get("status") != "captured":
             raise BadRequestException(
@@ -1759,7 +1690,13 @@ class PaymentService:
         payment.status = PaymentStatus.SUCCESS.value
         payment.provider_reference = razorpay_payment_id
         payment.paid_at = paid_at
-        payment.provider_metadata = json.dumps(rz_payment)
+
+        try:
+            current_meta = json.loads(payment.provider_metadata or "{}")
+        except Exception:
+            current_meta = {}
+        current_meta["razorpay_payment"] = rz_payment
+        payment.provider_metadata = json.dumps(current_meta)
 
         # 6. Record transaction
         await self.transactions.create_for_payment(
@@ -1767,7 +1704,6 @@ class PaymentService:
             transaction_type="PAYMENT_CAPTURED",
             status=PaymentStatus.SUCCESS.value,
             group_id=payment.group_id,
-            obligation_id=payment.obligation_id,
             razorpay_order_id=razorpay_order_id,
             razorpay_payment_id=razorpay_payment_id,
             provider_transaction_id=razorpay_payment_id,
@@ -1777,21 +1713,6 @@ class PaymentService:
             gateway_response=json.dumps(rz_payment),
         )
 
-        # 7. Update obligation ledger
-        if payment.obligation_id:
-            obligation = await self.obligations.get_by_id_for_update(payment.obligation_id)
-            if obligation:
-                await self._recalculate_obligation_ledger(obligation)
-
-        # 8. Update fee record to PAID
-        if payment.fee_id:
-            fee_result = await self.session.execute(
-                select(Fee).where(Fee.id == payment.fee_id)
-            )
-            fee = fee_result.scalar_one_or_none()
-            if fee:
-                fee.status = FeeStatus.PAID.value
-
         await self.audit.log(
             AuditAction.PAYMENT_VERIFY,
             entity_type="payment",
@@ -1800,44 +1721,66 @@ class PaymentService:
                 "order_id": razorpay_order_id,
                 "razorpay_payment_id": razorpay_payment_id,
                 "amount": str(captured_amount),
-                "workflow": "GROUP_ADMIN_FLUTTER_CHECKOUT",
+                "workflow": PaymentWorkflow.MEMBER_CONTRIBUTION.value,
             },
             ip_address=ip_address,
             user_agent=user_agent,
         )
-
         await self.session.flush()
 
-        response = GroupFeeVerifyResponse(
+        response = ContributionVerifyResponse(
             status="SUCCESS",
-            message="Payment verified successfully",
+            message="Contribution payment verified successfully",
             transaction_id=razorpay_payment_id,
+            amount=captured_amount,
+            currency=payment.currency,
             paid_at=paid_at,
-            receipt_url=None,  # Receipt generation can be added later
+            purpose=purpose,
+            donor_name=donor_name,
+            receipt_url=None,
         )
         return response.model_dump(mode="json")
 
-    async def get_group_payment_history(
+    async def list_contributions(
         self,
-        group_id: uuid.UUID,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        """Return list of past successful fee payments for a group.
+        *,
+        user: Any,
+        group_id: uuid.UUID | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """List past successful voluntary contributions."""
+        from app.core.constants import RoleName, resolve_role_name
+        from app.schemas.payment import ContributionHistoryItem
 
-        Used by GET /groups/{group_id}/payments in the Flutter app.
-        """
-        from app.schemas.group_fee import GroupPaymentHistoryItem
+        role = resolve_role_name(user.role.name) if user and user.role else RoleName.MEMBER
 
-        # Fetch all successful payments for this group
+        stmt = select(Payment).where(
+            Payment.workflow == PaymentWorkflow.MEMBER_CONTRIBUTION.value,
+            Payment.status == PaymentStatus.SUCCESS.value,
+        )
+
+        if role == RoleName.SUPER_ADMIN:
+            if group_id:
+                stmt = stmt.where(Payment.group_id == group_id)
+        elif role == RoleName.GROUP_ADMIN:
+            effective_group_id = group_id or user.group_id
+            stmt = stmt.where(Payment.group_id == effective_group_id)
+        else:
+            # MEMBER: filter to payments linked to their member id or group
+            if hasattr(user, "member") and user.member:
+                stmt = stmt.where(Payment.member_id == user.member.id)
+            elif user.group_id:
+                stmt = stmt.where(Payment.group_id == user.group_id)
+
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total = (await self.session.execute(count_stmt)).scalar_one()
+
+        offset = (page - 1) * page_size
         stmt = (
-            select(Payment)
-            .where(
-                Payment.group_id == group_id,
-                Payment.status == PaymentStatus.SUCCESS.value,
-            )
-            .order_by(Payment.paid_at.desc())
-            .limit(limit)
+            stmt.options(selectinload(Payment.group))
+            .order_by(Payment.paid_at.desc().nullslast(), Payment.created_at.desc())
+            .limit(page_size)
             .offset(offset)
         )
         result = await self.session.execute(stmt)
@@ -1845,48 +1788,40 @@ class PaymentService:
 
         items: list[dict[str, Any]] = []
         for p in payments:
-            # Try to get financial year from linked obligation or fee
-            fy = ""
-            if p.obligation_id:
-                obl_result = await self.session.execute(
-                    select(GroupPaymentObligation.billing_period).where(
-                        GroupPaymentObligation.id == p.obligation_id
-                    )
-                )
-                row = obl_result.scalar_one_or_none()
-                if row:
-                    fy = row
-            if not fy and p.fee_id:
-                fee_result = await self.session.execute(
-                    select(Fee.financial_year).where(Fee.id == p.fee_id)
-                )
-                row = fee_result.scalar_one_or_none()
-                if row:
-                    fy = row
-            if not fy:
-                fy = financial_year_for(p.paid_at) if p.paid_at else financial_year_for()
+            purpose = None
+            notes = None
+            if p.provider_metadata:
+                try:
+                    meta = json.loads(p.provider_metadata)
+                    purpose = meta.get("purpose")
+                    notes = meta.get("notes")
+                except Exception:
+                    pass
 
-            # Get payment method from latest transaction
-            tx_result = await self.session.execute(
-                select(PaymentTransaction.payment_method).where(
-                    PaymentTransaction.payment_id == p.id,
-                    PaymentTransaction.status == PaymentStatus.SUCCESS.value,
-                ).order_by(PaymentTransaction.created_at.desc()).limit(1)
-            )
-            method = tx_result.scalar_one_or_none()
+            group_name = p.group.name if p.group else None
 
-            item = GroupPaymentHistoryItem(
-                payment_id=p.id,
-                financial_year=fy,
-                amount=float(p.amount),
+            item = ContributionHistoryItem(
+                id=p.id,
+                order_id=p.order_id,
+                transaction_id=p.provider_reference,
+                amount=p.amount,
                 currency=p.currency,
                 status=p.status,
-                transaction_id=p.provider_reference,
+                group_id=p.group_id,
+                group_name=group_name,
+                member_id=p.member_id,
+                purpose=purpose,
+                notes=notes,
                 paid_at=p.paid_at,
-                receipt_url=None,
-                payment_method=method,
                 created_at=p.created_at,
             )
             items.append(item.model_dump(mode="json"))
 
-        return items
+        pagination = {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size if total > 0 else 0,
+        }
+        return items, pagination
+

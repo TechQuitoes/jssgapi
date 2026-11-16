@@ -68,7 +68,13 @@ from app.schemas.notification import (  # noqa: F401
     NotificationSendRequest,
 )
 from app.schemas.payment import (  # noqa: F401
+    ContributionHistoryItem,
+    ContributionOrderRequest,
+    ContributionOrderResponse,
+    ContributionVerifyRequest,
+    ContributionVerifyResponse,
     PaymentCreate,
+    PaymentCreateResponse,
     PaymentOut,
     PaymentTransactionOut,
     PaymentVerifyRequest,
