@@ -1520,10 +1520,9 @@ class PaymentService:
 
         # Optional member check (link if this user has an associated member profile)
         member_id: uuid.UUID | None = None
-        if hasattr(user, "member") and user.member:
-            member_id = user.member.id
-        elif hasattr(user, "id") and user.id:
-            member_stmt = select(Member.id).where(Member.user_id == user.id).limit(1)
+        user_id = getattr(user, "id", None)
+        if user_id is not None:
+            member_stmt = select(Member.id).where(Member.user_id == user_id).limit(1)
             member_res = await self.session.execute(member_stmt)
             member_id = member_res.scalar_one_or_none()
 
@@ -1768,9 +1767,16 @@ class PaymentService:
             stmt = stmt.where(Payment.group_id == effective_group_id)
         else:
             # MEMBER: filter to payments linked to their member id or group
-            if hasattr(user, "member") and user.member:
-                stmt = stmt.where(Payment.member_id == user.member.id)
-            elif user.group_id:
+            member_id: uuid.UUID | None = None
+            user_id = getattr(user, "id", None)
+            if user_id is not None:
+                member_stmt = select(Member.id).where(Member.user_id == user_id).limit(1)
+                member_res = await self.session.execute(member_stmt)
+                member_id = member_res.scalar_one_or_none()
+
+            if member_id is not None:
+                stmt = stmt.where(Payment.member_id == member_id)
+            elif getattr(user, "group_id", None):
                 stmt = stmt.where(Payment.group_id == user.group_id)
 
         count_stmt = select(func.count()).select_from(stmt.subquery())
