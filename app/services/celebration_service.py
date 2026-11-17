@@ -25,6 +25,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.redis import redis_client
 from app.core.scope import AccessScope
 from app.models.family import FamilyMember
 from app.models.member import Member
@@ -98,6 +99,60 @@ def _same_day(value: Any, target: date) -> bool:
     return False
 
 
+def _date_text_patterns(target: date) -> list[str]:
+    """Generate SQL ILIKE patterns for matching target month and day across date string formats."""
+    pairs = [(target.day, target.month)]
+    if target.month == 2 and target.day == 28:
+        try:
+            date(target.year, 2, 29)
+        except ValueError:
+            pairs.append((29, 2))
+
+    patterns: set[str] = set()
+    for d, m in pairs:
+        # ISO format: YYYY-MM-DD
+        patterns.add(f"%-{m:02d}-{d:02d}")
+        patterns.add(f"%-{m:02d}-{d:02d}T%")
+        patterns.add(f"%-{m:02d}-{d:02d} %")
+        # Standard Indian format: DD/MM/YYYY, DD-MM-YYYY
+        patterns.add(f"{d:02d}/{m:02d}/%")
+        patterns.add(f"{d:02d}-{m:02d}-%")
+        patterns.add(f"{d}/{m}/%")
+        patterns.add(f"{d}-{m}-%")
+        patterns.add(f"{d:02d}/{m}/%")
+        patterns.add(f"{d:02d}-{m}-%")
+        patterns.add(f"{d}/{m:02d}/%")
+        patterns.add(f"{d}-{m:02d}-%")
+        # US format: M/D/YYYY, MM/DD/YYYY
+        patterns.add(f"{m}/{d}/%")
+        patterns.add(f"{m:02d}/{d:02d}/%")
+        patterns.add(f"{m}/{d:02d}/%")
+        patterns.add(f"{m:02d}/{d}/%")
+
+    return sorted(patterns)
+
+
+def _date_col_match(col, target: date):
+    """SQL condition to match a DATE column's month and day."""
+    conds = [
+        and_(
+            func.extract("month", col) == target.month,
+            func.extract("day", col) == target.day,
+        )
+    ]
+    if target.month == 2 and target.day == 28:
+        try:
+            date(target.year, 2, 29)
+        except ValueError:
+            conds.append(
+                and_(
+                    func.extract("month", col) == 2,
+                    func.extract("day", col) == 29,
+                )
+            )
+    return or_(*conds) if len(conds) > 1 else conds[0]
+
+
 class CelebrationService:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -120,7 +175,18 @@ class CelebrationService:
                 if now - cached_time < _CELEBRATION_CACHE_TTL:
                     return list(cached_items)
 
-        members = await self._candidates(scope, self._birthday_candidates())
+        redis_key = (
+            f"cache:celebrations:birthdays:{target.isoformat()}:"
+            f"{scope.unrestricted}:{scope.group_id or 'none'}:{scope.member_id or 'none'}"
+        )
+        cached_json = await redis_client.get_json(redis_key)
+        if cached_json is not None:
+            items = [BirthdayOut.model_validate(item) for item in cached_json]
+            with _CELEBRATION_CACHE_LOCK:
+                _BIRTHDAY_CACHE[cache_key] = (now, items)
+            return items
+
+        members = await self._candidates(scope, self._birthday_candidates(target))
         items: list[BirthdayOut] = []
         for member in members:
             profile = self.profiles.build_profile(member)
@@ -153,6 +219,14 @@ class CelebrationService:
                 )
         with _CELEBRATION_CACHE_LOCK:
             _BIRTHDAY_CACHE[cache_key] = (now, items)
+        try:
+            await redis_client.set_json(
+                redis_key,
+                [item.model_dump(mode="json") for item in items],
+                ttl=3600,
+            )
+        except Exception:
+            pass
         return items
 
     async def anniversaries(
@@ -171,7 +245,18 @@ class CelebrationService:
                 if now - cached_time < _CELEBRATION_CACHE_TTL:
                     return list(cached_items)
 
-        members = await self._candidates(scope, self._anniversary_candidates())
+        redis_key = (
+            f"cache:celebrations:anniversaries:{target.isoformat()}:"
+            f"{scope.unrestricted}:{scope.group_id or 'none'}:{scope.member_id or 'none'}"
+        )
+        cached_json = await redis_client.get_json(redis_key)
+        if cached_json is not None:
+            items = [AnniversaryOut.model_validate(item) for item in cached_json]
+            with _CELEBRATION_CACHE_LOCK:
+                _ANNIVERSARY_CACHE[cache_key] = (now, items)
+            return items
+
+        members = await self._candidates(scope, self._anniversary_candidates(target))
         items: list[AnniversaryOut] = []
         for member in members:
             profile = self.profiles.build_profile(member)
@@ -190,6 +275,14 @@ class CelebrationService:
             )
         with _CELEBRATION_CACHE_LOCK:
             _ANNIVERSARY_CACHE[cache_key] = (now, items)
+        try:
+            await redis_client.set_json(
+                redis_key,
+                [item.model_dump(mode="json") for item in items],
+                ttl=3600,
+            )
+        except Exception:
+            pass
         return items
 
     # ------------------------------------------------------------------
@@ -213,14 +306,33 @@ class CelebrationService:
         return list(result.scalars().all())
 
     @staticmethod
-    def _birthday_candidates():
+    def _birthday_candidates(target: date | None = None):
+        if target is None:
+            return or_(
+                Member.date_of_birth.isnot(None),
+                Member.profile_data["member_dob"].astext.isnot(None),
+                Member.profile_data["spouse_dob"].astext.isnot(None),
+                Member.family_members.any(
+                    and_(
+                        FamilyMember.date_of_birth.isnot(None),
+                        func.lower(func.trim(FamilyMember.relationship_type)).in_(
+                            SPOUSE_ALIASES
+                        ),
+                    )
+                ),
+            )
+        patterns = _date_text_patterns(target)
+        m_dob_text = Member.profile_data["member_dob"].astext
+        s_dob_text = Member.profile_data["spouse_dob"].astext
+        text_conds = [m_dob_text.ilike(p) for p in patterns] + [
+            s_dob_text.ilike(p) for p in patterns
+        ]
         return or_(
-            Member.date_of_birth.isnot(None),
-            Member.profile_data["member_dob"].astext.isnot(None),
-            Member.profile_data["spouse_dob"].astext.isnot(None),
+            _date_col_match(Member.date_of_birth, target),
+            *text_conds,
             Member.family_members.any(
                 and_(
-                    FamilyMember.date_of_birth.isnot(None),
+                    _date_col_match(FamilyMember.date_of_birth, target),
                     func.lower(func.trim(FamilyMember.relationship_type)).in_(
                         SPOUSE_ALIASES
                     ),
@@ -229,8 +341,12 @@ class CelebrationService:
         )
 
     @staticmethod
-    def _anniversary_candidates():
-        return Member.profile_data["anniversary_date"].astext.isnot(None)
+    def _anniversary_candidates(target: date | None = None):
+        if target is None:
+            return Member.profile_data["anniversary_date"].astext.isnot(None)
+        patterns = _date_text_patterns(target)
+        col = Member.profile_data["anniversary_date"].astext
+        return or_(*(col.ilike(p) for p in patterns))
 
 
 def _scope_conditions(scope: AccessScope) -> list:

@@ -35,7 +35,10 @@ async def lifespan(app: FastAPI):
         upstash_url=settings.upstash_redis_rest_url,
         upstash_token=settings.upstash_redis_rest_token,
     )
-    await bootstrap_app(async_session_factory)
+    if settings.auto_bootstrap_on_startup:
+        await bootstrap_app(async_session_factory)
+    else:
+        logger.info("Startup bootstrap skipped (AUTO_BOOTSTRAP_ON_STARTUP=false)")
     try:
         yield
     finally:

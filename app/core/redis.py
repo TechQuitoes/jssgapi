@@ -584,15 +584,17 @@ redis_client = UnifiedRedisClient()
 
 # Cache Invalidation Helpers
 async def invalidate_member_cache() -> None:
-    """Invalidate all member list caches and dashboard counts."""
+    """Invalidate all member list caches, celebrations, and dashboard counts."""
     await redis_client.delete_pattern("cache:members:*")
     await redis_client.delete_pattern("cache:dashboard:*")
+    await redis_client.delete_pattern("cache:celebrations:*")
 
 
 async def invalidate_group_cache() -> None:
-    """Invalidate all group list caches and dashboard counts."""
+    """Invalidate all group list caches, celebrations, and dashboard counts."""
     await redis_client.delete_pattern("cache:groups:*")
     await redis_client.delete_pattern("cache:dashboard:*")
+    await redis_client.delete_pattern("cache:celebrations:*")
 
 
 async def invalidate_dashboard_cache() -> None:

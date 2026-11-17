@@ -117,6 +117,21 @@ def _make_client():
     return translate.TranslationServiceClient(credentials=credentials, client_options=client_options)
 
 
+_client_lock = Lock()
+_cached_client = None
+
+
+def _get_translation_client():
+    global _cached_client
+    if _cached_client is not None:
+        return _cached_client
+    with _client_lock:
+        if _cached_client is not None:
+            return _cached_client
+        _cached_client = _make_client()
+        return _cached_client
+
+
 def _translate_text(
     text: str,
     target_language: str,
@@ -125,11 +140,13 @@ def _translate_text(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> TranslationResult:
     try:
-        client = _make_client()
+        client = _get_translation_client()
     except ServiceUnavailableException:
         # Configuration problems already carry a specific, safe message.
         raise
     except Exception as exc:
+        global _cached_client
+        _cached_client = None
         logger.warning("Failed to initialize translation client: %s", exc)
         raise ServiceUnavailableException("Translation service is not configured")
 
