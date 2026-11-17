@@ -51,7 +51,6 @@ from app.services.audit_service import AuditService
 from app.services.member_photo_service import SLOTS, MemberPhotoService
 from app.services.profile_service import ProfileService
 from app.utils.file_upload import MAX_IMAGE_SIZE
-from app.utils.helpers import format_to_dd_mm_yyyy
 
 router = APIRouter(prefix="/members", tags=["Members"])
 
@@ -60,54 +59,6 @@ CREATE = Depends(require_permission(Permission.MEMBER_CREATE))
 UPDATE = Depends(require_permission(Permission.MEMBER_UPDATE))
 DELETE = Depends(require_permission(Permission.MEMBER_DELETE))
 APPROVE = Depends(require_permission(Permission.MEMBER_APPROVE))
-
-
-def _member_base_dict(member: Member) -> dict[str, Any]:
-    """Lightweight dictionary extraction avoiding intermediate Pydantic validation."""
-    group = member.group
-    if group is not None and getattr(group, "is_deleted", False):
-        group = None
-    group_name = group.name if group else None
-    group_id = group.id if group else member.group_id
-    group_code = getattr(group, "group_id", None) if group else None
-
-    raw_profile_group = (
-        (member.profile_data or {}).get("social_group_association_name")
-        or (member.profile_data or {}).get("social_group_name")
-    )
-    social_group_name = group_name or raw_profile_group
-    social_group_association_name = raw_profile_group or group_name
-
-    dob = member.date_of_birth
-    formatted_dob = format_to_dd_mm_yyyy(dob) if dob else None
-
-    return {
-        "id": member.id,
-        "member_id": member.id,
-        "user_id": member.user_id,
-        "group_id": group_id,
-        "group_name": group_name,
-        "group_code": group_code,
-        "social_group_name": social_group_name,
-        "social_group_association_name": social_group_association_name,
-        "groups": [],
-        "group_memberships": [],
-        "location_id": member.location_id,
-        "first_name": member.first_name,
-        "middle_name": member.middle_name,
-        "last_name": member.last_name,
-        "gender": member.gender,
-        "date_of_birth": formatted_dob,
-        "blood_group": member.blood_group,
-        "profile_photo_url": member.profile_photo_url,
-        "contact_email": member.contact_email,
-        "contact_phone": member.contact_phone,
-        "address_line": member.address_line,
-        "occupation_summary": member.occupation_summary,
-        "membership_number": member.membership_number,
-        "membership_status": member.membership_status,
-        "status": member.membership_status,
-    }
 
 
 def _member_out(member: Member) -> MemberOut:
@@ -139,7 +90,7 @@ def _member_out(member: Member) -> MemberOut:
 
 
 def _member_list_item(member: Member, profiles: ProfileService) -> MemberListItemOut:
-    out_dict = _member_base_dict(member)
+    out_dict = _member_out(member).model_dump()
     prof_dict = profiles.get_profile_dict(member)
     merged = {**out_dict, **prof_dict}
     if not merged.get("date_of_birth") and merged.get("member_dob"):
