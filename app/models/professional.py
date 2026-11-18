@@ -23,8 +23,11 @@ class ProfessionalInformation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         index=True,
     )
     occupation: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    occupation_hi: Mapped[str | None] = mapped_column(String(400), nullable=True)
     company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    company_name_hi: Mapped[str | None] = mapped_column(String(400), nullable=True)
     designation: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    designation_hi: Mapped[str | None] = mapped_column(String(400), nullable=True)
     industry: Mapped[str | None] = mapped_column(String(100), nullable=True)
     business_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     business_email: Mapped[str | None] = mapped_column(String(255), nullable=True)

@@ -55,8 +55,11 @@ class Member(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    first_name_hi: Mapped[str | None] = mapped_column(String(200), nullable=True)
     middle_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    middle_name_hi: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    last_name_hi: Mapped[str | None] = mapped_column(String(200), nullable=True)
     gender: Mapped[str | None] = mapped_column(String(20), nullable=True)
     date_of_birth: Mapped[date | None] = mapped_column(Date, nullable=True)
     blood_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
@@ -83,7 +86,9 @@ class Member(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     contact_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contact_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     address_line: Mapped[str | None] = mapped_column(Text, nullable=True)
+    address_line_hi: Mapped[str | None] = mapped_column(Text, nullable=True)
     occupation_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    occupation_summary_hi: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     membership_number: Mapped[str | None] = mapped_column(
         String(50), unique=True, nullable=True, index=True

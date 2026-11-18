@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, Optional, Tuple
 
+import httpx
+
 from app.config import get_settings
 from app.core.exceptions import BadRequestException, ServiceUnavailableException
 
@@ -59,6 +61,82 @@ class TranslationCache:
 
 _cache = TranslationCache()
 
+
+# ---------------------------------------------------------------------------
+# Azure Translator (Microsoft) — Free F0: 2 million characters/month
+# ---------------------------------------------------------------------------
+
+def _translate_via_azure(
+    text: str,
+    target_language: str,
+    source_language: Optional[str] = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> TranslationResult:
+    """Translate *text* using the Microsoft Azure Translator REST API.
+
+    Uses the ``httpx`` client that is already a project dependency so no new
+    packages are required.  The Free (F0) tier allows 2 million characters per
+    month at zero cost, which is more than enough for this project.
+    """
+    settings = get_settings()
+    key = (settings.azure_translator_key or "").strip()
+    region = (settings.azure_translator_region or "").strip()
+    endpoint = (settings.azure_translator_endpoint or "https://api.cognitive.microsofttranslator.com").rstrip("/")
+
+    if not key:
+        raise ServiceUnavailableException("AZURE_TRANSLATOR_KEY is not configured")
+    if not region:
+        raise ServiceUnavailableException("AZURE_TRANSLATOR_REGION is not configured")
+
+    url = f"{endpoint}/translate"
+    params: Dict[str, Any] = {
+        "api-version": "3.0",
+        "to": target_language,
+    }
+    if source_language:
+        params["from"] = source_language
+
+    headers = {
+        "Ocp-Apim-Subscription-Key": key,
+        "Ocp-Apim-Subscription-Region": region,
+        "Content-Type": "application/json",
+    }
+    body = [{"text": text}]
+
+    try:
+        response = httpx.post(url, params=params, headers=headers, json=body, timeout=timeout)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        logger.warning("Azure Translator API returned HTTP %s: %s", exc.response.status_code, exc.response.text)
+        raise ServiceUnavailableException("Azure Translation service failed to translate the text") from exc
+    except Exception as exc:
+        logger.warning("Azure Translator API call failed: %s", exc)
+        raise ServiceUnavailableException("Azure Translation service is unavailable") from exc
+
+    data = response.json()
+    if not data or not data[0].get("translations"):
+        raise ServiceUnavailableException("Azure Translation service returned no results")
+
+    translated_text = data[0]["translations"][0]["text"]
+    detected_language: Optional[str] = None
+    detected_raw = data[0].get("detectedLanguage", {})
+    if detected_raw:
+        detected_language = detected_raw.get("language") or None
+
+    src_lang = source_language or detected_language or ""
+
+    return TranslationResult(
+        original_text=text,
+        translated_text=translated_text,
+        source_language=src_lang,
+        target_language=target_language,
+        detected_language=detected_language,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Google Cloud Translation — legacy provider (kept intact, used as fallback)
+# ---------------------------------------------------------------------------
 
 def _get_credentials_from_inline(raw: str):
     from google.oauth2 import service_account
@@ -132,7 +210,7 @@ def _get_translation_client():
         return _cached_client
 
 
-def _translate_text(
+def _translate_via_google(
     text: str,
     target_language: str,
     source_language: Optional[str] = None,
@@ -208,6 +286,34 @@ def _translate_text(
     )
 
 
+# ---------------------------------------------------------------------------
+# Public API — provider-aware dispatcher (used by the /translate endpoint and
+# the backfill script)
+# ---------------------------------------------------------------------------
+
+def _translate_text(
+    text: str,
+    target_language: str,
+    source_language: Optional[str] = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> TranslationResult:
+    """Route the translation request to the configured provider.
+
+    ``TRANSLATION_PROVIDER=azure``  → Microsoft Azure Translator (default now)
+    ``TRANSLATION_PROVIDER=google`` → Google Cloud Translation (legacy)
+
+    Both providers return an identical :class:`TranslationResult`, so callers
+    do not need to know which backend was used.
+    """
+    settings = get_settings()
+    provider = (settings.translation_provider or "google").strip().lower()
+
+    if provider == "azure":
+        return _translate_via_azure(text, target_language, source_language, timeout)
+    else:
+        return _translate_via_google(text, target_language, source_language, timeout=timeout)
+
+
 def translate_text(
     text: str,
     target_language: str,
@@ -222,10 +328,6 @@ def translate_text(
         raise BadRequestException(f"Text exceeds maximum length of {max_length} characters")
 
     target_language = target_language.lower().strip()
-    if target_language not in SUPPORTED_LANGUAGES:
-        # Allow other languages too, but validate format loosely? Keep simple.
-        pass
-
     if source_language:
         source_language = source_language.lower().strip()
 

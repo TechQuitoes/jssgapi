@@ -202,6 +202,16 @@ class Settings(BaseSettings):
     google_service_account_json: str = ""
     google_translate_enabled: bool = True
 
+    # Translation provider selection: "azure" or "google"
+    # Set TRANSLATION_PROVIDER=azure to use Microsoft Azure Translator (Free F0 tier).
+    # Falls back to Google Cloud Translation when set to "google" or left empty.
+    translation_provider: Literal["azure", "google"] = "google"
+
+    # Microsoft Azure Translator (Free F0: 2M characters/month, no charge)
+    azure_translator_key: str = ""
+    azure_translator_region: str = ""
+    azure_translator_endpoint: str = "https://api.cognitive.microsofttranslator.com"
+
 
     # Payment
     payment_provider: str = ""

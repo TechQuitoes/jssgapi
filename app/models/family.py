@@ -24,11 +24,13 @@ class FamilyMember(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         index=True,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    name_hi: Mapped[str | None] = mapped_column(String(400), nullable=True)
     relationship_type: Mapped[str] = mapped_column(
         "relationship", String(100), nullable=False
     )
     date_of_birth: Mapped[date | None] = mapped_column(Date, nullable=True)
     occupation: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    occupation_hi: Mapped[str | None] = mapped_column(String(400), nullable=True)
     contact_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_visible: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_approved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

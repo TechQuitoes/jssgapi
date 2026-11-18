@@ -43,6 +43,7 @@ class SocialGroup(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "social_groups"
 
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name_hi: Mapped[str | None] = mapped_column(String(400), nullable=True)
     #: Server-generated business code, e.g. ``MP09001`` - state code + city code
     #: + per-city sequence. Never accepted from a client and never rewritten by
     #: an update; NULL only for rows materialized before ID generation existed
@@ -55,7 +56,9 @@ class SocialGroup(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     state: Mapped[str | None] = mapped_column(String(100), nullable=True)
     city: Mapped[str | None] = mapped_column(String(100), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_hi: Mapped[str | None] = mapped_column(Text, nullable=True)
     contact_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    contact_name_hi: Mapped[str | None] = mapped_column(String(400), nullable=True)
     contact_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contact_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
