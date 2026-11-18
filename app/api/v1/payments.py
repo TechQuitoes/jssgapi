@@ -14,11 +14,13 @@ from app.dependencies import CurrentUser, DBSession, require_permission
 from app.models.payment import Payment
 from app.repositories.payment_repository import PaymentRepository
 from app.schemas.group_payment import (
+    GroupCheckoutOrderCreateRequest,
     GroupObligationOut,
     GroupPaymentDetailOut,
     GroupPaymentLinkResponse,
     GroupPaymentOrderCreateResponse,
     GroupPaymentVerifyRequest,
+    PaymentSettingsModel,
     PaymentSummaryOut,
 )
 from app.schemas.payment import (
@@ -92,18 +94,45 @@ async def get_group_payment_obligation(
     return ok("Group obligation detail fetched successfully", detail.model_dump(by_alias=True))
 
 
+@router.get("/settings", dependencies=[READ])
+async def get_payment_settings(
+    db: DBSession,
+):
+    """Fetch global payment collection module configuration."""
+    service = PaymentService(db)
+    settings_data = await service.get_payment_settings()
+    return ok("Payment settings fetched successfully", settings_data)
+
+
+@router.put("/settings", dependencies=[MANAGE])
+@router.patch("/settings", dependencies=[MANAGE])
+async def update_payment_settings(
+    body: PaymentSettingsModel,
+    db: DBSession,
+):
+    """Update payment collection settings and optionally apply to existing obligations."""
+    service = PaymentService(db)
+    updated = await service.update_payment_settings(body.model_dump())
+    return ok("Payment settings updated successfully", updated)
+
+
 @router.post("/groups/{group_id}/order", dependencies=[MANAGE])
 async def create_group_checkout_order(
     group_id: UUID,
     db: DBSession,
     request: Request,
+    body: GroupCheckoutOrderCreateRequest | None = None,
     billing_period: str | None = Query(default=None),
+    amount: float | None = Query(default=None),
 ):
     """WORKFLOW A: Create a Razorpay Order for Super Admin checkout."""
     service = PaymentService(db)
+    chosen_period = (body.billing_period if body and body.billing_period else None) or billing_period
+    chosen_amount = (body.amount if body and body.amount is not None else None) or amount
     order_res = await service.create_group_checkout_order(
         group_id=group_id,
-        billing_period=billing_period,
+        billing_period=chosen_period,
+        amount=chosen_amount,
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )

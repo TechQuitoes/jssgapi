@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, Date, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -82,6 +83,7 @@ class GroupPaymentObligation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
         default=GroupObligationStatus.UNPAID.value,
     )
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     active_payment_link_id: Mapped[str | None] = mapped_column(
         String(100), nullable=True

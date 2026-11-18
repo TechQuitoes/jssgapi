@@ -245,6 +245,8 @@ class PaymentService:
             pct = round((col / exp) * 100, 1) if exp > 0 else 0.0
             out = GroupObligationOut.model_validate(item)
             out.collection_percentage = pct
+            if not out.due_date:
+                out.due_date = "2027-03-31"
             outputs.append(out)
 
         pagination = {
@@ -268,6 +270,8 @@ class PaymentService:
 
         obligation_out = GroupObligationOut.model_validate(obligation)
         obligation_out.collection_percentage = pct
+        if not obligation_out.due_date:
+            obligation_out.due_date = "2027-03-31"
 
         tx_list = await self.transactions.list_for_obligation(obligation.id)
         tx_outs = [GroupPaymentTransactionOut.model_validate(t) for t in tx_list]
@@ -280,10 +284,11 @@ class PaymentService:
         self,
         group_id: uuid.UUID,
         billing_period: str | None = None,
+        amount: Decimal | float | None = None,
         ip_address: str | None = None,
         user_agent: str | None = None,
     ) -> GroupPaymentOrderCreateResponse:
-        """Create a Razorpay order for Super Admin checkout for the exact outstanding amount."""
+        """Create a Razorpay order for Super Admin checkout for full or custom amount."""
         period = billing_period or financial_year_for()
         obligation = await self.get_or_create_group_obligation(group_id, period)
 
@@ -298,7 +303,14 @@ class PaymentService:
         if locked_obligation.status == GroupObligationStatus.NOT_APPLICABLE.value:
             raise BadRequestException("Group has 0 eligible members and cannot accept payments.")
 
-        amount_to_pay = Decimal(str(locked_obligation.pending_amount))
+        pending_amount = Decimal(str(locked_obligation.pending_amount))
+        if amount is not None and Decimal(str(amount)) > 0:
+            custom_amount = Decimal(str(amount)).quantize(Decimal("0.01"))
+            if custom_amount > pending_amount:
+                raise BadRequestException(f"Payment amount (₹{custom_amount}) cannot exceed pending amount (₹{pending_amount}).")
+            amount_to_pay = custom_amount
+        else:
+            amount_to_pay = pending_amount
         receipt = f"JSSG-SA-{locked_obligation.group_id.hex[:6]}-{uuid.uuid4().hex[:6]}"
 
         razorpay_order = create_razorpay_order(
@@ -914,6 +926,80 @@ class PaymentService:
             obligation.status = GroupObligationStatus.UNPAID.value
 
         obligation.updated_at = datetime.now(UTC)
+
+    # ── Payment Module Settings ─────────────────────────────────────────
+
+    async def get_payment_settings(self) -> dict[str, Any]:
+        """Fetch global payment module settings from app_settings or fallback defaults."""
+        from sqlalchemy import text
+        stmt = text("SELECT value FROM app_settings WHERE key = 'payment_settings' LIMIT 1;")
+        res = await self.session.execute(stmt)
+        row = res.scalar_one_or_none()
+        defaults: dict[str, Any] = {
+            "rate_per_member": float(settings.group_member_rate or 100.0),
+            "billing_period": financial_year_for(),
+            "due_date": "2027-03-31",
+            "late_fee": 0.0,
+            "allow_partial_payments": True,
+            "min_partial_amount": 100.0,
+            "payment_gateway": "Razorpay",
+            "razorpay_key_id": settings.razorpay_key_id or "rzp_test_TzeUn0Iazq0yuq",
+            "allowed_payment_methods": ["UPI", "Net Banking", "Debit/Credit Card"],
+        }
+        if row:
+            if isinstance(row, dict):
+                defaults.update(row)
+            elif isinstance(row, str):
+                import json
+                try:
+                    defaults.update(json.loads(row))
+                except Exception:
+                    pass
+        return defaults
+
+    async def update_payment_settings(self, new_settings: dict[str, Any]) -> dict[str, Any]:
+        """Update payment module settings, and optionally apply to existing obligations."""
+        from sqlalchemy import text
+        import json
+        current = await self.get_payment_settings()
+        apply_existing = new_settings.pop("apply_to_existing_obligations", False)
+        current.update(new_settings)
+
+        stmt = text("""
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES ('payment_settings', :val::jsonb, now())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+        """)
+        await self.session.execute(stmt, {"val": json.dumps(current)})
+
+        if apply_existing:
+            period = current.get("billing_period") or financial_year_for()
+            due_date_val = current.get("due_date", "2027-03-31")
+            new_rate = Decimal(str(current.get("rate_per_member", 100.0)))
+
+            update_stmt = text("""
+                UPDATE group_payment_obligations
+                SET due_date = :due_date,
+                    rate_per_member = :rate,
+                    expected_amount = member_count_snapshot * :rate,
+                    pending_amount = GREATEST(0, (member_count_snapshot * :rate) - collected_amount),
+                    status = CASE 
+                        WHEN member_count_snapshot = 0 THEN 'NOT_APPLICABLE'
+                        WHEN collected_amount >= (member_count_snapshot * :rate) THEN 'PAID'
+                        WHEN collected_amount > 0 THEN 'PARTIAL'
+                        ELSE 'UNPAID'
+                    END,
+                    updated_at = now()
+                WHERE billing_period = :period;
+            """)
+            await self.session.execute(update_stmt, {
+                "due_date": due_date_val,
+                "rate": new_rate,
+                "period": period,
+            })
+
+        await self.session.commit()
+        return current
 
     # ── Legacy Individual Payment Methods ────────────────────────────────
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class PaymentSummaryOut(BaseModel):
@@ -44,15 +45,42 @@ class GroupObligationOut(BaseModel):
     pending_amount: float
     collection_percentage: float = 0.0
     status: str
+    due_date: str | None = None
     active_payment_link_id: str | None = None
     active_payment_link_url: str | None = None
     created_at: datetime
     updated_at: datetime
 
+    @field_validator("due_date", mode="before")
+    def _parse_due_date(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        if isinstance(v, (date, datetime)):
+            return v.strftime("%Y-%m-%d")
+        return str(v)
+
 
 class GroupPaymentDetailOut(BaseModel):
     obligation: GroupObligationOut
     transactions: list[GroupPaymentTransactionOut] = []
+
+
+class GroupCheckoutOrderCreateRequest(BaseModel):
+    amount: float | None = None
+    billing_period: str | None = None
+
+
+class PaymentSettingsModel(BaseModel):
+    rate_per_member: float = 100.0
+    billing_period: str = "2026-2027"
+    due_date: str = "2027-03-31"
+    late_fee: float = 0.0
+    allow_partial_payments: bool = True
+    min_partial_amount: float = 100.0
+    payment_gateway: str = "Razorpay"
+    razorpay_key_id: str = "rzp_test_TzeUn0Iazq0yuq"
+    allowed_payment_methods: list[str] = ["UPI", "Net Banking", "Debit/Credit Card"]
+    apply_to_existing_obligations: bool = False
 
 
 class GroupPaymentOrderCreateResponse(BaseModel):
