@@ -960,32 +960,47 @@ class PaymentService:
     async def update_payment_settings(self, new_settings: dict[str, Any]) -> dict[str, Any]:
         """Update payment module settings, and optionally apply to existing obligations."""
         from sqlalchemy import text
+        from datetime import date
         import json
         current = await self.get_payment_settings()
-        apply_existing = new_settings.pop("apply_to_existing_obligations", False)
+        # Default apply_to_existing_obligations to True so that updating the rate or due date
+        # immediately recalculates the group obligations for the active billing period.
+        apply_existing = new_settings.pop("apply_to_existing_obligations", True)
+        if apply_existing is None:
+            apply_existing = True
         current.update(new_settings)
 
         stmt = text("""
             INSERT INTO app_settings (key, value, updated_at)
-            VALUES ('payment_settings', :val::jsonb, now())
+            VALUES ('payment_settings', CAST(:val AS jsonb), now())
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
         """)
         await self.session.execute(stmt, {"val": json.dumps(current)})
 
         if apply_existing:
             period = current.get("billing_period") or financial_year_for()
-            due_date_val = current.get("due_date", "2027-03-31")
+            due_date_raw = current.get("due_date", "2027-03-31")
+            if isinstance(due_date_raw, str):
+                try:
+                    due_date_obj = date.fromisoformat(due_date_raw.strip())
+                except Exception:
+                    due_date_obj = date(2027, 3, 31)
+            elif isinstance(due_date_raw, date):
+                due_date_obj = due_date_raw
+            else:
+                due_date_obj = date(2027, 3, 31)
+
             new_rate = Decimal(str(current.get("rate_per_member", 100.0)))
 
             update_stmt = text("""
                 UPDATE group_payment_obligations
                 SET due_date = :due_date,
-                    rate_per_member = :rate,
-                    expected_amount = member_count_snapshot * :rate,
-                    pending_amount = GREATEST(0, (member_count_snapshot * :rate) - collected_amount),
+                    rate_per_member = CAST(:rate AS numeric),
+                    expected_amount = member_count_snapshot * CAST(:rate AS numeric),
+                    pending_amount = GREATEST(0, (member_count_snapshot * CAST(:rate AS numeric)) - collected_amount),
                     status = CASE 
                         WHEN member_count_snapshot = 0 THEN 'NOT_APPLICABLE'
-                        WHEN collected_amount >= (member_count_snapshot * :rate) THEN 'PAID'
+                        WHEN collected_amount >= (member_count_snapshot * CAST(:rate AS numeric)) THEN 'PAID'
                         WHEN collected_amount > 0 THEN 'PARTIAL'
                         ELSE 'UNPAID'
                     END,
@@ -993,7 +1008,7 @@ class PaymentService:
                 WHERE billing_period = :period;
             """)
             await self.session.execute(update_stmt, {
-                "due_date": due_date_val,
+                "due_date": due_date_obj,
                 "rate": new_rate,
                 "period": period,
             })
@@ -1870,7 +1885,7 @@ class PaymentService:
 
         offset = (page - 1) * page_size
         stmt = (
-            stmt.options(selectinload(Payment.group))
+            stmt.options(selectinload(Payment.group), selectinload(Payment.member))
             .order_by(Payment.paid_at.desc().nullslast(), Payment.created_at.desc())
             .limit(page_size)
             .offset(offset)
@@ -1882,26 +1897,46 @@ class PaymentService:
         for p in payments:
             purpose = None
             notes = None
+            donor_name = None
+            donor_phone = None
+            payment_method = None
+            receipt_no = p.order_id
             if p.provider_metadata:
                 try:
-                    meta = json.loads(p.provider_metadata)
+                    meta = json.loads(p.provider_metadata) if isinstance(p.provider_metadata, str) else p.provider_metadata
                     purpose = meta.get("purpose")
                     notes = meta.get("notes")
+                    donor_name = meta.get("donor_name")
+                    donor_phone = meta.get("donor_phone")
+                    payment_method = meta.get("payment_method")
+                    receipt_no = meta.get("receipt_no") or p.order_id
                 except Exception:
                     pass
 
             group_name = p.group.name if p.group else None
+            member_name = None
+            if p.member:
+                member_name = f"{p.member.first_name} {p.member.last_name or ''}".strip()
+                if not donor_phone and hasattr(p.member, "contact_phone"):
+                    donor_phone = p.member.contact_phone
+            elif donor_name:
+                member_name = donor_name
 
             item = ContributionHistoryItem(
                 id=p.id,
                 order_id=p.order_id,
                 transaction_id=p.provider_reference,
+                receipt_no=receipt_no,
                 amount=p.amount,
                 currency=p.currency,
                 status=p.status,
                 group_id=p.group_id,
                 group_name=group_name,
                 member_id=p.member_id,
+                member_name=member_name,
+                donor_name=donor_name or member_name,
+                donor_phone=donor_phone,
+                payment_method=payment_method or ("OFFLINE" if p.provider in ("OFFLINE", "BANK_DIRECT") else "ONLINE"),
                 purpose=purpose,
                 notes=notes,
                 paid_at=p.paid_at,
@@ -1916,4 +1951,94 @@ class PaymentService:
             "total_pages": (total + page_size - 1) // page_size if total > 0 else 0,
         }
         return items, pagination
+
+    async def record_manual_contribution(
+        self,
+        *,
+        amount: Decimal,
+        donor_name: str,
+        donor_phone: str | None = None,
+        group_id: uuid.UUID | None = None,
+        member_id: uuid.UUID | None = None,
+        payment_method: str = "CASH",
+        transaction_id: str | None = None,
+        purpose: str | None = None,
+        notes: str | None = None,
+        paid_at: datetime | None = None,
+        current_user: Any = None,
+    ) -> dict[str, Any]:
+        """Record an offline / direct voluntary contribution by Admin."""
+        from app.core.constants import PaymentStatus, PaymentWorkflow
+        from datetime import timezone
+
+        if amount <= Decimal("0"):
+            raise BadRequestException("Contribution amount must be greater than 0")
+
+        group_name = None
+        if group_id:
+            grp = await self.groups.get_by_id(group_id)
+            if grp:
+                group_name = grp.name
+
+        member_name = donor_name
+        if member_id:
+            m_res = await self.session.execute(select(Member).where(Member.id == member_id).limit(1))
+            m = m_res.scalar_one_or_none()
+            if m:
+                member_name = f"{m.first_name} {m.last_name or ''}".strip()
+                if not donor_phone and getattr(m, "contact_phone", None):
+                    donor_phone = m.contact_phone
+
+        pay_time = paid_at or datetime.now(timezone.utc)
+        receipt_code = f"REC-{uuid.uuid4().hex[:8].upper()}"
+        order_code = f"cnt_man_{uuid.uuid4().hex[:10]}"
+        txn_ref = transaction_id or f"TXN-{uuid.uuid4().hex[:10].upper()}"
+
+        meta = {
+            "purpose": purpose or "General Contribution",
+            "notes": notes,
+            "donor_name": donor_name,
+            "donor_phone": donor_phone,
+            "payment_method": payment_method.upper(),
+            "receipt_no": receipt_code,
+            "recorded_by": str(getattr(current_user, "id", "admin")),
+            "is_manual": True,
+        }
+
+        payment = await self.payments.create(
+            member_id=member_id,
+            group_id=group_id,
+            obligation_id=None,
+            fee_id=None,
+            order_id=order_code,
+            amount=amount,
+            currency="INR",
+            status=PaymentStatus.SUCCESS.value,
+            provider="OFFLINE" if payment_method.upper() in ("CASH", "CHEQUE") else "BANK_DIRECT",
+            provider_reference=txn_ref,
+            paid_at=pay_time,
+            provider_metadata=json.dumps(meta),
+            workflow=PaymentWorkflow.MEMBER_CONTRIBUTION.value,
+        )
+
+        return {
+            "id": str(payment.id),
+            "order_id": payment.order_id,
+            "transaction_id": txn_ref,
+            "receipt_no": receipt_code,
+            "amount": float(payment.amount),
+            "currency": payment.currency,
+            "status": payment.status,
+            "group_id": str(group_id) if group_id else None,
+            "group_name": group_name,
+            "member_id": str(member_id) if member_id else None,
+            "member_name": member_name,
+            "donor_name": donor_name,
+            "donor_phone": donor_phone,
+            "payment_method": payment_method.upper(),
+            "purpose": purpose or "General Contribution",
+            "notes": notes,
+            "paid_at": pay_time.isoformat(),
+            "created_at": payment.created_at.isoformat() if hasattr(payment, "created_at") else pay_time.isoformat(),
+        }
 

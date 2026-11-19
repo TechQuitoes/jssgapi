@@ -8,8 +8,11 @@ from pydantic import BaseModel, ConfigDict
 
 class ProfessionalInfoCreate(BaseModel):
     occupation: str | None = None
+    occupation_hi: str | None = None
     company_name: str | None = None
+    company_name_hi: str | None = None
     designation: str | None = None
+    designation_hi: str | None = None
     industry: str | None = None
     business_phone: str | None = None
     business_email: str | None = None
@@ -20,8 +23,11 @@ class ProfessionalInfoCreate(BaseModel):
 
 class ProfessionalInfoUpdate(BaseModel):
     occupation: str | None = None
+    occupation_hi: str | None = None
     company_name: str | None = None
+    company_name_hi: str | None = None
     designation: str | None = None
+    designation_hi: str | None = None
     industry: str | None = None
     business_phone: str | None = None
     business_email: str | None = None
@@ -36,8 +42,11 @@ class ProfessionalInfoOut(BaseModel):
     id: UUID
     member_id: UUID
     occupation: str | None = None
+    occupation_hi: str | None = None
     company_name: str | None = None
+    company_name_hi: str | None = None
     designation: str | None = None
+    designation_hi: str | None = None
     industry: str | None = None
     business_phone: str | None = None
     business_email: str | None = None

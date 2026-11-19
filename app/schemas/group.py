@@ -130,10 +130,13 @@ class SocialGroupOut(BaseModel):
     id: UUID
     group_id: str | None = None
     name: str
+    name_hi: str | None = None
     state: str | None = None
     city: str | None = None
     description: str | None = None
+    description_hi: str | None = None
     contact_name: str | None = None
+    contact_name_hi: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None
     address: str | None = None

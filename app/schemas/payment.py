@@ -131,14 +131,34 @@ class ContributionHistoryItem(BaseModel):
     id: UUID
     order_id: str
     transaction_id: str | None = None
+    receipt_no: str | None = None
     amount: Decimal
     currency: str
     status: str
     group_id: UUID | None = None
     group_name: str | None = None
     member_id: UUID | None = None
+    member_name: str | None = None
+    donor_name: str | None = None
+    donor_phone: str | None = None
+    payment_method: str | None = None
     purpose: str | None = None
     notes: str | None = None
     paid_at: datetime | None = None
     created_at: datetime
+
+
+class ContributionManualRequest(BaseModel):
+    """Request payload to manually record an offline/direct contribution."""
+
+    amount: Decimal = Field(..., gt=0, description="Contribution amount in INR")
+    donor_name: str = Field(..., min_length=2, description="Contributor/Donor name")
+    donor_phone: str | None = Field(default=None, description="Donor phone number")
+    group_id: UUID | None = Field(default=None, description="Optional associated group UUID")
+    member_id: UUID | None = Field(default=None, description="Optional associated member UUID")
+    payment_method: str = Field(default="CASH", description="Payment mode: CASH, CHEQUE, UPI, BANK_TRANSFER")
+    transaction_id: str | None = Field(default=None, description="Offline ref, Cheque no, or UTR")
+    purpose: str | None = Field(default="General Contribution", description="Contribution purpose/fund")
+    notes: str | None = Field(default=None, description="Additional remarks")
+    paid_at: datetime | None = Field(default=None, description="Date & time when payment was received")
 

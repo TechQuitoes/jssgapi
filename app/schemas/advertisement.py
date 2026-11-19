@@ -101,6 +101,8 @@ class AdvertisementOut(BaseModel):
     is_active: bool
     payment_status: str | None = None
     payment_id: UUID | None = None
+    transaction_id: str | None = None
+    payment_method: str | None = None
     group_id: UUID | None = None
     group_name: str | None = None
     advertiser_id: UUID | None = None
@@ -109,3 +111,43 @@ class AdvertisementOut(BaseModel):
     rejection_reason: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class AdvertisementRenewRequest(BaseModel):
+    """Payload to renew an advertisement for a new subscription period."""
+
+    subscription_months: int = Field(ge=1, description="Number of months for renewed subscription")
+    start_date: datetime | date | None = None
+    end_date: datetime | date | None = None
+    payment_method: str = "ONLINE"
+    payment_status: str = "PAID"
+    transaction_id: str | None = None
+
+
+class AdvertisementPaymentOrderResponse(BaseModel):
+    """Response returned when a Razorpay checkout order is initiated for an ad."""
+
+    order_id: str
+    razorpay_order_id: str
+    razorpay_key_id: str
+    amount: float
+    currency: str
+    advertisement_id: UUID
+    title: str
+
+
+class AdvertisementPaymentVerifyRequest(BaseModel):
+    """Request payload to verify Razorpay checkout for an advertisement."""
+
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+class AdvertisementManualPaymentRequest(BaseModel):
+    """Payload to record an offline payment (Cash/Cheque/Bank) or Waive payment."""
+
+    payment_method: str = Field(default="CASH", description="CASH, CHEQUE, BANK_TRANSFER, WAIVED")
+    transaction_id: str | None = None
+    notes: str | None = None
+

@@ -1,7 +1,11 @@
 from app.schemas.advertisement import (  # noqa: F401
     AdvertisementApproveRequest,
     AdvertisementCreate,
+    AdvertisementManualPaymentRequest,
     AdvertisementOut,
+    AdvertisementPaymentOrderResponse,
+    AdvertisementPaymentVerifyRequest,
+    AdvertisementRenewRequest,
     AdvertisementUpdate,
     SubscriptionDurationOption,
 )
@@ -69,6 +73,7 @@ from app.schemas.notification import (  # noqa: F401
 )
 from app.schemas.payment import (  # noqa: F401
     ContributionHistoryItem,
+    ContributionManualRequest,
     ContributionOrderRequest,
     ContributionOrderResponse,
     ContributionVerifyRequest,

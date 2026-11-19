@@ -43,9 +43,11 @@ class FamilyMemberOut(BaseModel):
     id: UUID
     member_id: UUID
     name: str
+    name_hi: str | None = None
     relationship_type: str
     date_of_birth: str | None = None
     occupation: str | None = None
+    occupation_hi: str | None = None
 
     @field_validator("date_of_birth", mode="before")
     @classmethod

@@ -25,6 +25,7 @@ from app.schemas.group_payment import (
 )
 from app.schemas.payment import (
     ContributionHistoryItem,
+    ContributionManualRequest,
     ContributionOrderRequest,
     ContributionOrderResponse,
     ContributionVerifyRequest,
@@ -107,12 +108,28 @@ async def get_payment_settings(
 @router.put("/settings", dependencies=[MANAGE])
 @router.patch("/settings", dependencies=[MANAGE])
 async def update_payment_settings(
-    body: PaymentSettingsModel,
+    request: Request,
     db: DBSession,
 ):
     """Update payment collection settings and optionally apply to existing obligations."""
+    import json
+    raw = await request.body()
+    data: dict[str, Any] = {}
+    if raw:
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+            if isinstance(parsed, str):
+                try:
+                    parsed = json.loads(parsed)
+                except Exception:
+                    pass
+            if isinstance(parsed, dict):
+                data = parsed
+        except Exception:
+            pass
+    validated = PaymentSettingsModel.model_validate(data)
     service = PaymentService(db)
-    updated = await service.update_payment_settings(body.model_dump())
+    updated = await service.update_payment_settings(validated.model_dump())
     return ok("Payment settings updated successfully", updated)
 
 
@@ -303,6 +320,30 @@ async def list_contributions(
         page_size=page_size,
     )
     return paginated("Contributions fetched successfully", items, pagination)
+
+
+@router.post("/contributions/manual", status_code=201)
+async def record_manual_contribution(
+    body: ContributionManualRequest,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Record an offline / direct voluntary contribution (Super Admin / Group Admin)."""
+    service = PaymentService(db)
+    result = await service.record_manual_contribution(
+        amount=body.amount,
+        donor_name=body.donor_name,
+        donor_phone=body.donor_phone,
+        group_id=body.group_id,
+        member_id=body.member_id,
+        payment_method=body.payment_method,
+        transaction_id=body.transaction_id,
+        purpose=body.purpose,
+        notes=body.notes,
+        paid_at=body.paid_at,
+        current_user=current_user,
+    )
+    return created("Contribution recorded successfully", result)
 
 
 @router.post("")

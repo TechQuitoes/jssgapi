@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -15,6 +16,7 @@ from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKe
 if TYPE_CHECKING:
     from app.models.advertisement_subscription_plan import AdvertisementSubscriptionPlan
     from app.models.group import SocialGroup
+    from app.models.payment import Payment
     from app.models.user import User
 
 
@@ -106,10 +108,33 @@ class Advertisement(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     subscription_plan: Mapped[AdvertisementSubscriptionPlan | None] = relationship(
         lazy="selectin"
     )
+    payment: Mapped[Payment | None] = relationship(lazy="selectin")
 
     @property
     def group_name(self) -> str | None:
         return self.group.name if self.group else None
+
+    @property
+    def transaction_id(self) -> str | None:
+        if self.payment:
+            return self.payment.provider_reference or self.payment.order_id
+        return None
+
+    @property
+    def payment_method(self) -> str | None:
+        if self.payment:
+            if self.payment.provider_metadata:
+                try:
+                    meta = (
+                        json.loads(self.payment.provider_metadata)
+                        if isinstance(self.payment.provider_metadata, str)
+                        else self.payment.provider_metadata
+                    )
+                    return meta.get("payment_method") or self.payment.provider
+                except Exception:
+                    pass
+            return self.payment.provider
+        return None
 
     def __repr__(self) -> str:
         return f"<Advertisement {self.title}>"

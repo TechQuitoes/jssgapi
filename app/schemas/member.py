@@ -219,8 +219,11 @@ class MemberOut(BaseModel):
     group_memberships: list[MemberGroupMembershipOut] = []
     location_id: UUID | None = None
     first_name: str
+    first_name_hi: str | None = None
     middle_name: str | None = None
+    middle_name_hi: str | None = None
     last_name: str
+    last_name_hi: str | None = None
     gender: str | None = None
     date_of_birth: str | None = None
     blood_group: str | None = None
@@ -233,7 +236,9 @@ class MemberOut(BaseModel):
     contact_email: str | None = None
     contact_phone: str | None = None
     address_line: str | None = None
+    address_line_hi: str | None = None
     occupation_summary: str | None = None
+    occupation_summary_hi: str | None = None
     membership_number: str | None = None
     membership_status: str
     status: str | None = None

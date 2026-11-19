@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import calendar
+import json
+import uuid
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
@@ -19,7 +21,11 @@ from app.repositories.advertisement_repository import AdvertisementRepository
 from app.schemas.advertisement import (
     AdvertisementApproveRequest,
     AdvertisementCreate,
+    AdvertisementManualPaymentRequest,
     AdvertisementOut,
+    AdvertisementPaymentOrderResponse,
+    AdvertisementPaymentVerifyRequest,
+    AdvertisementRenewRequest,
     AdvertisementUpdate,
     SubscriptionDurationOption,
     SubscriptionPricingUpdate,
@@ -580,30 +586,10 @@ async def update_advertisement(
         dump["start_date"] = _to_utc_datetime(dump["start_date"])
     if "end_date" in dump:
         dump["end_date"] = _to_utc_datetime(dump["end_date"])
-    # A purchase is a historical snapshot: never let a later price change or an
-    # edit request rewrite what was actually paid. A renewal is a new purchase.
-    if "amount" in dump:
-        if dump["amount"] is not None:
-            requested = Decimal(str(dump["amount"])).quantize(Decimal("0.01"))
-            stored = Decimal(str(ad.amount or 0)).quantize(Decimal("0.01"))
-            if requested != stored:
-                raise BadRequestException(
-                    "Subscription amount is locked after purchase. "
-                    "Create a new advertisement subscription to use the latest price.",
-                    "SUBSCRIPTION_SNAPSHOT_LOCKED",
-                )
-        dump.pop("amount")
-    if "subscription_months" in dump:
-        if (
-            dump["subscription_months"] is not None
-            and dump["subscription_months"] != ad.subscription_months
-        ):
-            raise BadRequestException(
-                "Subscription duration is locked after purchase. "
-                "Create a new advertisement subscription to change duration.",
-                "SUBSCRIPTION_SNAPSHOT_LOCKED",
-            )
-        dump.pop("subscription_months")
+    if "amount" in dump and dump["amount"] is not None:
+        dump["amount"] = Decimal(str(dump["amount"])).quantize(Decimal("0.01"))
+    if "subscription_months" in dump and dump["subscription_months"] is not None:
+        dump["subscription_months"] = int(dump["subscription_months"])
 
     ad = await repo.update(ad, **dump)
     await AuditService(db).log(
@@ -637,3 +623,285 @@ async def delete_advertisement(
     )
     await db.flush()
     return ok("Advertisement deleted successfully")
+
+
+# ── Advertisement Renewal & Payment Endpoints ─────────────────────────
+
+
+@router.post("/{advertisement_id}/renew", dependencies=[CREATE])
+async def renew_advertisement(
+    advertisement_id: UUID,
+    body: AdvertisementRenewRequest,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Renew an advertisement subscription with a new period and auto-calculated end date."""
+    repo = AdvertisementRepository(db)
+    ad = await repo.get_by_id(advertisement_id)
+    if ad is None:
+        raise NotFoundException("Advertisement", str(advertisement_id))
+    await assert_group_access(db, current_user, ad.group_id)
+
+    plan = await AdvertisementService(db).resolve_plan(body.subscription_months)
+    now_dt = _now()
+
+    # If the ad has a future end_date, start renewal from that date; otherwise from now
+    start_dt = _to_utc_datetime(body.start_date)
+    if not start_dt:
+        if ad.end_date and ad.end_date > now_dt:
+            start_dt = ad.end_date
+        else:
+            start_dt = now_dt
+
+    # End date is auto-calculated from subscription months
+    end_dt = _to_utc_datetime(body.end_date)
+    if not end_dt:
+        end_dt = _add_months(start_dt, plan.months)
+
+    ad.subscription_months = plan.months
+    ad.subscription_plan_id = plan.id
+    ad.amount = plan.price
+    ad.currency = plan.currency
+    ad.start_date = start_dt
+    ad.end_date = end_dt
+    ad.subscription_start_date = start_dt
+    ad.subscription_expiry_date = end_dt
+    ad.status = AdvertisementStatus.APPROVED.value
+    ad.is_active = True
+    ad.payment_status = body.payment_status or "PAID"
+    ad.rejection_reason = None
+    ad.purchased_at = now_dt
+
+    await db.flush()
+    await db.refresh(ad)
+
+    await AuditService(db).log(
+        AuditAction.ADVERTISEMENT_UPDATE,
+        user_id=current_user.id,
+        entity_type="advertisement",
+        entity_id=ad.id,
+        details={"action": "renew", "months": plan.months, "amount": float(plan.price)},
+    )
+    return ok("Advertisement renewed successfully", AdvertisementOut.model_validate(ad))
+
+
+@router.post("/{advertisement_id}/payment/order", dependencies=[CREATE])
+async def create_ad_payment_order(
+    advertisement_id: UUID,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Create a Razorpay order for advertisement subscription payment."""
+    from app.core.config import get_settings
+    from app.integrations.razorpay import create_razorpay_order
+    from app.models.payment import Payment
+
+    repo = AdvertisementRepository(db)
+    ad = await repo.get_by_id(advertisement_id)
+    if ad is None:
+        raise NotFoundException("Advertisement", str(advertisement_id))
+
+    amount = Decimal(str(ad.amount or 0))
+    if amount <= Decimal("0"):
+        ad.payment_status = "WAIVED"
+        await db.flush()
+        return ok("Advertisement payment waived", {"status": "WAIVED"})
+
+    settings = get_settings()
+    receipt = f"ad_{str(ad.id)[:12]}"
+    notes = {
+        "workflow": "ADVERTISEMENT_SUBSCRIPTION",
+        "advertisement_id": str(ad.id),
+        "title": ad.title[:50],
+        "user_id": str(current_user.id),
+    }
+
+    rzp_order = create_razorpay_order(
+        amount=amount,
+        currency="INR",
+        receipt=receipt,
+        notes=notes,
+    )
+
+    payment = Payment(
+        member_id=None,
+        group_id=ad.group_id,
+        obligation_id=None,
+        fee_id=None,
+        order_id=rzp_order["id"],
+        amount=amount,
+        currency="INR",
+        status="PENDING",
+        provider="RAZORPAY",
+        provider_reference=None,
+        paid_at=None,
+        provider_metadata=json.dumps({"advertisement_id": str(ad.id), "title": ad.title}),
+        workflow="ADVERTISEMENT_SUBSCRIPTION",
+    )
+    db.add(payment)
+    await db.flush()
+
+    ad.payment_id = payment.id
+    ad.payment_status = "PENDING"
+    await db.flush()
+
+    return ok(
+        "Payment order created successfully",
+        AdvertisementPaymentOrderResponse(
+            order_id=str(payment.id),
+            razorpay_order_id=rzp_order["id"],
+            razorpay_key_id=settings.razorpay_key_id,
+            amount=float(amount),
+            currency="INR",
+            advertisement_id=ad.id,
+            title=ad.title,
+        ).model_dump(),
+    )
+
+
+@router.post("/{advertisement_id}/payment/verify", dependencies=[CREATE])
+async def verify_ad_payment(
+    advertisement_id: UUID,
+    body: AdvertisementPaymentVerifyRequest,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Verify Razorpay payment signature and mark advertisement as PAID and APPROVED."""
+    from app.integrations.razorpay import verify_razorpay_payment_signature
+    from app.models.payment import Payment
+
+    repo = AdvertisementRepository(db)
+    ad = await repo.get_by_id(advertisement_id)
+    if ad is None:
+        raise NotFoundException("Advertisement", str(advertisement_id))
+
+    verify_razorpay_payment_signature(
+        razorpay_order_id=body.razorpay_order_id,
+        razorpay_payment_id=body.razorpay_payment_id,
+        razorpay_signature=body.razorpay_signature,
+    )
+
+    if ad.payment_id:
+        p_res = await db.execute(select(Payment).where(Payment.id == ad.payment_id))
+        payment = p_res.scalar_one_or_none()
+        if payment:
+            payment.status = "SUCCESS"
+            payment.provider_reference = body.razorpay_payment_id
+            payment.paid_at = _now()
+
+    ad.payment_status = "PAID"
+    ad.status = AdvertisementStatus.APPROVED.value
+    ad.is_active = True
+    await db.flush()
+    await db.refresh(ad)
+
+    return ok("Payment verified and advertisement activated", AdvertisementOut.model_validate(ad))
+
+
+@router.post("/{advertisement_id}/payment/link", dependencies=[CREATE])
+async def create_ad_payment_link(
+    advertisement_id: UUID,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Generate a mobile-friendly Razorpay payment link for the advertiser."""
+    from app.integrations.razorpay import create_razorpay_payment_link
+
+    repo = AdvertisementRepository(db)
+    ad = await repo.get_by_id(advertisement_id)
+    if ad is None:
+        raise NotFoundException("Advertisement", str(advertisement_id))
+
+    amount = Decimal(str(ad.amount or 0))
+    if amount <= Decimal("0"):
+        raise BadRequestException("Cannot generate payment link for 0 amount")
+
+    customer_phone = (ad.mobile_number or "").replace(" ", "").replace("-", "")
+    customer_name = ad.person_name or "Advertiser"
+
+    link_data = create_razorpay_payment_link(
+        amount=amount,
+        description=f"JSSG Ad: {ad.title[:40]} ({ad.subscription_months} mo)",
+        customer_name=customer_name,
+        customer_contact=customer_phone if len(customer_phone) >= 10 else None,
+        notes={
+            "workflow": "ADVERTISEMENT_SUBSCRIPTION",
+            "advertisement_id": str(ad.id),
+            "title": ad.title[:50],
+        },
+    )
+
+    return ok(
+        "Payment link created successfully",
+        {
+            "payment_link_id": link_data.get("id"),
+            "short_url": link_data.get("short_url"),
+            "amount": float(amount),
+            "currency": "INR",
+        },
+    )
+
+
+@router.post("/{advertisement_id}/payment/manual", dependencies=[CREATE])
+async def record_ad_manual_payment(
+    advertisement_id: UUID,
+    body: AdvertisementManualPaymentRequest,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Record manual/offline payment (Cash/Cheque/Bank Transfer) or Waive ad fee."""
+    from app.models.payment import Payment
+
+    repo = AdvertisementRepository(db)
+    ad = await repo.get_by_id(advertisement_id)
+    if ad is None:
+        raise NotFoundException("Advertisement", str(advertisement_id))
+
+    method = (body.payment_method or "CASH").upper()
+    now_dt = _now()
+
+    if method == "WAIVED":
+        ad.payment_status = "WAIVED"
+        ad.status = AdvertisementStatus.APPROVED.value
+        ad.is_active = True
+        await db.flush()
+        await db.refresh(ad)
+        return ok("Advertisement payment waived", AdvertisementOut.model_validate(ad))
+
+    amount = Decimal(str(ad.amount or 0))
+    txn_ref = body.transaction_id or f"OFF-{now_dt.strftime('%Y%m%d')}-{str(ad.id)[:6].upper()}"
+
+    meta = {
+        "payment_method": method,
+        "notes": body.notes,
+        "advertisement_id": str(ad.id),
+        "recorded_by": str(current_user.id),
+    }
+
+    payment = Payment(
+        member_id=None,
+        group_id=ad.group_id,
+        obligation_id=None,
+        fee_id=None,
+        order_id=f"ad_man_{str(uuid.uuid4())[:8]}",
+        amount=amount,
+        currency="INR",
+        status="SUCCESS",
+        provider="OFFLINE" if method in ("CASH", "CHEQUE") else "BANK_DIRECT",
+        provider_reference=txn_ref,
+        paid_at=now_dt,
+        provider_metadata=json.dumps(meta),
+        workflow="ADVERTISEMENT_SUBSCRIPTION",
+    )
+    db.add(payment)
+    await db.flush()
+
+    ad.payment_id = payment.id
+    ad.payment_status = "PAID"
+    ad.status = AdvertisementStatus.APPROVED.value
+    ad.is_active = True
+    await db.flush()
+    await db.refresh(ad)
+
+    return ok("Manual payment recorded successfully", AdvertisementOut.model_validate(ad))
+
