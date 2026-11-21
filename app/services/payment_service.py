@@ -473,6 +473,7 @@ class PaymentService:
                 self.session,
                 category="group_payment",
                 amount=captured_amount,
+                group_id=group_id,
                 group_name=obligation.group_name or f"Group {group_id}",
                 receipt_no=razorpay_payment_id,
                 transaction_id=razorpay_payment_id,
@@ -1484,6 +1485,18 @@ class PaymentService:
         try:
             from app.services.notification_service import create_payment_notification
 
+            # Resolve group from member if payment.group_id was not set
+            if not payment.group_id and payment.member_id:
+                m_res = await self.session.execute(
+                    select(Member)
+                    .options(selectinload(Member.group))
+                    .where(Member.id == payment.member_id)
+                    .limit(1)
+                )
+                m = m_res.scalar_one_or_none()
+                if m and m.group_id:
+                    payment.group_id = m.group_id
+
             group_name = None
             if payment.group_id:
                 grp = await self.groups.get_by_id(payment.group_id)
@@ -1494,6 +1507,7 @@ class PaymentService:
                 self.session,
                 category="group_payment",
                 amount=captured_amount,
+                group_id=payment.group_id,
                 group_name=group_name,
                 receipt_no=razorpay_payment_id,
                 transaction_id=razorpay_payment_id,
@@ -1655,22 +1669,36 @@ class PaymentService:
         if amount <= Decimal("0"):
             raise BadRequestException("Contribution amount must be greater than 0")
 
-        # Optional group check
-        effective_group_id = group_id or getattr(user, "group_id", None)
+        # Optional member check (link if this user has an associated member profile)
+        member_id: uuid.UUID | None = None
+        member_group_id: uuid.UUID | None = None
+        user_id = getattr(user, "id", None)
+        member: Member | None = None
+        if user_id is not None:
+            member_stmt = (
+                select(Member)
+                .options(selectinload(Member.group_memberships))
+                .where(Member.user_id == user_id)
+                .limit(1)
+            )
+            member_res = await self.session.execute(member_stmt)
+            member = member_res.scalar_one_or_none()
+            if member is not None:
+                member_id = member.id
+                member_group_id = member.group_id
+                if not member_group_id and member.group_memberships:
+                    sorted_memberships = sorted(member.group_memberships, key=lambda m: m.priority)
+                    member_group_id = sorted_memberships[0].group_id
+
+        # Optional group check:
+        # Priority: explicit group_id parameter > user.group_id > member.group_id
+        effective_group_id = group_id or getattr(user, "group_id", None) or member_group_id
         if effective_group_id is not None:
             grp = await self.groups.get_by_id(effective_group_id)
             if grp is None:
                 if group_id is not None:
                     raise NotFoundException("Group", str(group_id))
                 effective_group_id = None
-
-        # Optional member check (link if this user has an associated member profile)
-        member_id: uuid.UUID | None = None
-        user_id = getattr(user, "id", None)
-        if user_id is not None:
-            member_stmt = select(Member.id).where(Member.user_id == user_id).limit(1)
-            member_res = await self.session.execute(member_stmt)
-            member_id = member_res.scalar_one_or_none()
 
         receipt = f"cnt_{uuid.uuid4().hex[:14]}"
         amount_in_paise = int(amount * 100)
@@ -1693,14 +1721,21 @@ class PaymentService:
         )
         razorpay_order_id = razorpay_order["id"]
 
+        donor_full_name = getattr(user, "full_name", None)
+        if not donor_full_name and member:
+            donor_full_name = f"{member.first_name} {member.last_name or ''}".strip()
+        donor_contact_phone = getattr(user, "phone_number", None)
+        if not donor_contact_phone and member and getattr(member, "contact_phone", None):
+            donor_contact_phone = member.contact_phone
+
         metadata = {
             "razorpay_order": razorpay_order,
             "purpose": purpose,
             "notes": notes,
             "event_id": str(event_id) if event_id else None,
             "donor_user_id": str(user.id),
-            "donor_name": getattr(user, "full_name", None),
-            "donor_phone": getattr(user, "phone_number", None),
+            "donor_name": donor_full_name,
+            "donor_phone": donor_contact_phone,
         }
 
         payment = await self.payments.create(
@@ -1876,6 +1911,18 @@ class PaymentService:
         try:
             from app.services.notification_service import create_payment_notification
 
+            # Resolve group from member if payment.group_id was not set
+            if not payment.group_id and payment.member_id:
+                m_res = await self.session.execute(
+                    select(Member)
+                    .options(selectinload(Member.group))
+                    .where(Member.id == payment.member_id)
+                    .limit(1)
+                )
+                m = m_res.scalar_one_or_none()
+                if m and m.group_id:
+                    payment.group_id = m.group_id
+
             group_name = None
             if payment.group_id:
                 grp = await self.groups.get_by_id(payment.group_id)
@@ -1904,6 +1951,7 @@ class PaymentService:
                 self.session,
                 category="contribution",
                 amount=captured_amount,
+                group_id=payment.group_id,
                 donor_name=donor_name,
                 group_name=group_name,
                 purpose=purpose or "Voluntary Contribution",
@@ -1977,7 +2025,10 @@ class PaymentService:
 
         offset = (page - 1) * page_size
         stmt = (
-            stmt.options(selectinload(Payment.group), selectinload(Payment.member))
+            stmt.options(
+                selectinload(Payment.group),
+                selectinload(Payment.member).selectinload(Member.group),
+            )
             .order_by(Payment.paid_at.desc().nullslast(), Payment.created_at.desc())
             .limit(page_size)
             .offset(offset)
@@ -2006,6 +2057,12 @@ class PaymentService:
                     pass
 
             group_name = p.group.name if p.group else None
+            effective_group_id = p.group_id
+            if not group_name and p.member and p.member.group:
+                group_name = p.member.group.name
+                if not effective_group_id:
+                    effective_group_id = p.member.group_id
+
             member_name = None
             if p.member:
                 member_name = f"{p.member.first_name} {p.member.last_name or ''}".strip()
@@ -2022,7 +2079,7 @@ class PaymentService:
                 amount=p.amount,
                 currency=p.currency,
                 status=p.status,
-                group_id=p.group_id,
+                group_id=effective_group_id,
                 group_name=group_name,
                 member_id=p.member_id,
                 member_name=member_name,
@@ -2074,12 +2131,21 @@ class PaymentService:
 
         member_name = donor_name
         if member_id:
-            m_res = await self.session.execute(select(Member).where(Member.id == member_id).limit(1))
+            m_res = await self.session.execute(
+                select(Member)
+                .options(selectinload(Member.group))
+                .where(Member.id == member_id)
+                .limit(1)
+            )
             m = m_res.scalar_one_or_none()
             if m:
                 member_name = f"{m.first_name} {m.last_name or ''}".strip()
                 if not donor_phone and getattr(m, "contact_phone", None):
                     donor_phone = m.contact_phone
+                if not group_id and m.group_id:
+                    group_id = m.group_id
+                    if not group_name and m.group:
+                        group_name = m.group.name
 
         pay_time = paid_at or datetime.now(timezone.utc)
         receipt_code = f"REC-{uuid.uuid4().hex[:8].upper()}"
@@ -2127,6 +2193,7 @@ class PaymentService:
                 self.session,
                 category="contribution",
                 amount=amount,
+                group_id=group_id,
                 donor_name=donor_name or member_name,
                 group_name=group_name,
                 purpose=purpose or "General Contribution",

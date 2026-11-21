@@ -135,16 +135,20 @@ async def send_notification(
     )
     await db.flush()
 
-    if body.recipient_id:
-        try:
-            from app.services.notification_service import send_push_notification_to_user
+    try:
+        from app.services.notification_service import (
+            broadcast_push_notification,
+            send_push_notification_to_user,
+        )
 
-            push_data = {
-                "notification_id": str(notification.id),
-                "notification_type": body.notification_type,
-                "entity_type": body.entity_type or "",
-                "entity_id": str(body.entity_id) if body.entity_id else "",
-            }
+        push_data = {
+            "notification_id": str(notification.id),
+            "notification_type": body.notification_type,
+            "entity_type": body.entity_type or "",
+            "entity_id": str(body.entity_id) if body.entity_id else "",
+            "category": body.notification_type.lower(),
+        }
+        if body.recipient_id:
             await send_push_notification_to_user(
                 db,
                 body.recipient_id,
@@ -152,8 +156,16 @@ async def send_notification(
                 body=body.body or "",
                 data=push_data,
             )
-        except Exception:
-            pass
+        else:
+            # Broadcast to ALL active devices (all roles: MEMBER, GROUP_ADMIN, SUPER_ADMIN)
+            await broadcast_push_notification(
+                db,
+                title=body.title,
+                body=body.body or "",
+                data=push_data,
+            )
+    except Exception:
+        pass
 
     return created(
         "Notification sent successfully", NotificationOut.model_validate(notification)
@@ -191,6 +203,24 @@ async def broadcast_notification(
         sent_at=_now(),
     )
     await db.flush()
+
+    try:
+        from app.services.notification_service import broadcast_push_notification
+
+        push_data = {
+            "notification_id": str(notification.id),
+            "notification_type": body.notification_type,
+            "category": body.notification_type.lower(),
+        }
+        await broadcast_push_notification(
+            db,
+            title=body.title,
+            body=body.body or "",
+            data=push_data,
+        )
+    except Exception:
+        pass
+
     return ok(
         "Notification broadcast to recipients",
         NotificationOut.model_validate(notification),

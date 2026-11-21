@@ -37,7 +37,7 @@ class NotificationCreate(BaseModel):
 
 
 class NotificationSendRequest(BaseModel):
-    recipient_id: UUID
+    recipient_id: UUID | None = None
     title: str
     body: str | None = None
     notification_type: str = "GENERAL"

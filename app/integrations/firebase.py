@@ -185,3 +185,93 @@ async def send_fcm_push_async(
 ) -> bool:
     """Asynchronously sends an FCM push notification without blocking the asyncio loop."""
     return await asyncio.to_thread(send_fcm_push, device_token, title, body, data)
+
+
+def send_fcm_multicast(
+    device_tokens: list[str],
+    title: str,
+    body: str,
+    data: dict[str, Any] | None = None,
+) -> int:
+    """Sends an FCM push notification to multiple device tokens via multicast.
+
+    Batches tokens into chunks of 500 (Firebase Admin maximum).
+    Catches all errors so caller flows are never disrupted. Returns total success count.
+    """
+    valid_tokens = [t.strip() for t in device_tokens if t and t.strip()]
+    if not valid_tokens:
+        logger.warning("FCM Multicast skipped: no valid device tokens provided")
+        return 0
+
+    if not firebase_configured():
+        logger.warning("FCM Multicast skipped: Firebase is not configured on the server")
+        return 0
+
+    try:
+        app = _get_app()
+    except Exception as exc:
+        logger.error("FCM Multicast failed: unable to get Firebase app: %s", exc)
+        return 0
+
+    try:
+        from firebase_admin import messaging
+
+        string_data = {
+            str(k): str(v)
+            for k, v in (data or {}).items()
+            if v is not None
+        }
+
+        notification = messaging.Notification(title=title, body=body)
+        android_config = messaging.AndroidConfig(
+            priority="high",
+            notification=messaging.AndroidNotification(
+                channel_id="high_importance_channel",
+                sound="default",
+                default_sound=True,
+                default_vibrate_timings=True,
+            ),
+        )
+        apns_config = messaging.APNSConfig(
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(sound="default", badge=1)
+            )
+        )
+
+        total_success = 0
+        chunk_size = 500
+        for i in range(0, len(valid_tokens), chunk_size):
+            chunk = valid_tokens[i : i + chunk_size]
+            try:
+                multicast_message = messaging.MulticastMessage(
+                    tokens=chunk,
+                    notification=notification,
+                    data=string_data,
+                    android=android_config,
+                    apns=apns_config,
+                )
+                response = messaging.send_each_for_multicast(multicast_message, app=app)
+                total_success += response.success_count
+                logger.info(
+                    "FCM Multicast chunk sent: %d succeeded, %d failed out of %d tokens",
+                    response.success_count,
+                    response.failure_count,
+                    len(chunk),
+                )
+            except Exception as chunk_err:
+                logger.error("FCM Multicast chunk error: %s", chunk_err)
+
+        return total_success
+    except Exception as exc:
+        logger.error("FCM Multicast failed: %s", exc)
+        return 0
+
+
+async def send_fcm_multicast_async(
+    device_tokens: list[str],
+    title: str,
+    body: str,
+    data: dict[str, Any] | None = None,
+) -> int:
+    """Asynchronously sends an FCM multicast notification without blocking asyncio event loop."""
+    return await asyncio.to_thread(send_fcm_multicast, device_tokens, title, body, data)

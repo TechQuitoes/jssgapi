@@ -6,12 +6,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.integrations.firebase import send_fcm_push, send_fcm_push_async
+from app.integrations.firebase import (
+    send_fcm_multicast,
+    send_fcm_multicast_async,
+    send_fcm_push,
+    send_fcm_push_async,
+)
 from app.models.notification import DeviceToken, Notification
 from app.services.notification_service import (
+    broadcast_push_notification,
     create_payment_notification,
     get_active_device_tokens,
+    get_admin_user_ids,
     send_push_notification_to_user,
+    send_push_notification_to_users,
 )
 
 
@@ -77,6 +85,34 @@ def test_send_fcm_push_failure_does_not_raise(mock_conf, mock_send, mock_get_app
     assert result is False
 
 
+@patch("app.integrations.firebase._get_app")
+@patch("firebase_admin.messaging.send_each_for_multicast")
+@patch("app.integrations.firebase.firebase_configured", return_value=True)
+def test_send_fcm_multicast(mock_conf, mock_send_multicast, mock_get_app):
+    mock_app = MagicMock()
+    mock_get_app.return_value = mock_app
+
+    mock_batch = MagicMock()
+    mock_batch.success_count = 3
+    mock_batch.failure_count = 0
+    mock_send_multicast.return_value = mock_batch
+
+    tokens = ["token_1", "token_2", "token_3"]
+    sent = send_fcm_multicast(
+        tokens,
+        title="All Users Broadcast",
+        body="General Announcement",
+        data={"category": "general"},
+    )
+
+    assert sent == 3
+    assert mock_send_multicast.call_count == 1
+    call_msg = mock_send_multicast.call_args[0][0]
+    assert call_msg.tokens == tokens
+    assert call_msg.notification.title == "All Users Broadcast"
+    assert call_msg.android.priority == "high"
+
+
 @pytest.mark.asyncio
 @patch("app.integrations.firebase.send_fcm_push")
 async def test_send_fcm_push_async(mock_send):
@@ -114,40 +150,84 @@ async def test_send_push_notification_to_user():
 
 
 @pytest.mark.asyncio
-async def test_create_payment_notification_triggers_push():
+async def test_broadcast_push_notification():
+    session = AsyncMock()
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = ["token_1", "token_2", "token_3"]
+    session.execute.return_value = mock_result
+
+    with patch("app.integrations.firebase.send_fcm_multicast_async", new_callable=AsyncMock) as mock_multi:
+        mock_multi.return_value = 3
+
+        count = await broadcast_push_notification(
+            session,
+            title="General Announcement",
+            body="Event tomorrow",
+            data={"category": "event"},
+        )
+
+        assert count == 3
+        mock_multi.assert_called_once_with(
+            ["token_1", "token_2", "token_3"],
+            "General Announcement",
+            "Event tomorrow",
+            {"category": "event"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_payment_notification_member_and_admin_alerts():
+    """Verify that on payment/contribution:
+    a) Member receives confirmation: 'आपका ₹X का सहयोग सफलतापूर्वक प्राप्त हुआ, धन्यवाद!'
+    b) Group Admins & Super Admins receive alert: '₹X का नया सहयोग प्राप्त हुआ - {donor_name}'
+    """
     session = AsyncMock()
     session.add = MagicMock()
-    recipient_id = uuid.uuid4()
+    member_user_id = uuid.uuid4()
+    group_admin_id = uuid.uuid4()
+    super_admin_id = uuid.uuid4()
+    group_id = uuid.uuid4()
 
-    with patch("app.services.notification_service.send_push_notification_to_user", new_callable=AsyncMock) as mock_push:
-        mock_push.return_value = 1
+    with patch("app.services.notification_service.get_admin_user_ids", new_callable=AsyncMock) as mock_get_admins, \
+         patch("app.services.notification_service.send_push_notification_to_user", new_callable=AsyncMock) as mock_member_push, \
+         patch("app.services.notification_service.send_push_notification_to_users", new_callable=AsyncMock) as mock_admin_push:
+
+        mock_get_admins.return_value = [super_admin_id, group_admin_id]
+        mock_member_push.return_value = 1
+        mock_admin_push.return_value = 2
 
         notif = await create_payment_notification(
             session,
             category="contribution",
-            amount=Decimal("251.00"),
-            donor_name="Shreeram Yadav",
-            group_name="JSSG Federation",
-            purpose="Temple Fund",
-            receipt_no="pay_12345",
-            order_id="order_12345",
-            recipient_id=recipient_id,
+            amount=Decimal("501.00"),
+            group_id=group_id,
+            donor_name="Pankaj Jain",
+            group_name="Indore Mandal",
+            purpose="Mandir Seva",
+            receipt_no="pay_contrib_45678",
+            order_id="order_contrib_98765",
+            recipient_id=member_user_id,
         )
 
         assert notif is not None
-        assert notif.title == "Contribution Received"
-        assert notif.notification_type == "CONTRIBUTION"
-        session.add.assert_called_once()
-        session.flush.assert_called_once()
+        # Verify 2 notifications were added to session: one for member, one for admin view
+        assert session.add.call_count == 2
+        assert session.flush.call_count >= 1
 
-        mock_push.assert_called_once()
-        call_args = mock_push.call_args
-        assert call_args[0][1] == recipient_id
-        assert call_args[1]["title"] == "Contribution Received"
-        assert "₹251" in call_args[1]["body"]
-        assert "Shreeram Yadav" in call_args[1]["body"]
-        assert call_args[1]["data"]["category"] == "contribution"
-        assert call_args[1]["data"]["amount"] == "251.00"
-        assert call_args[1]["data"]["donor_name"] == "Shreeram Yadav"
-        assert call_args[1]["data"]["group_name"] == "JSSG Federation"
-        assert call_args[1]["data"]["order_id"] == "order_12345"
+        # a) Verify Member Push
+        mock_member_push.assert_called_once()
+        member_call = mock_member_push.call_args
+        assert member_call[0][1] == member_user_id
+        assert member_call[1]["title"] == "सहयोग प्राप्त हुआ"
+        assert "आपका ₹501 का सहयोग सफलतापूर्वक प्राप्त हुआ, धन्यवाद!" in member_call[1]["body"]
+        assert member_call[1]["data"]["target"] == "member"
+
+        # b) Verify Group Admin & Super Admin Push
+        mock_admin_push.assert_called_once()
+        admin_call = mock_admin_push.call_args
+        target_ids = admin_call[0][1]
+        assert set(target_ids) == {super_admin_id, group_admin_id}
+        assert admin_call[1]["title"] == "नया सहयोग प्राप्त हुआ"
+        assert "₹501 का नया सहयोग प्राप्त हुआ - Pankaj Jain (Indore Mandal)" in admin_call[1]["body"]
+        assert admin_call[1]["data"]["target"] == "admin"
