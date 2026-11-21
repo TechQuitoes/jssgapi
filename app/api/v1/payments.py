@@ -166,6 +166,7 @@ async def verify_group_checkout_payment(
     body: GroupPaymentVerifyRequest,
     db: DBSession,
     request: Request,
+    current_user: CurrentUser,
 ):
     """WORKFLOW A: Verify Super Admin checkout signature and credit common ledger."""
     service = PaymentService(db)
@@ -176,6 +177,7 @@ async def verify_group_checkout_payment(
         razorpay_signature=body.razorpay_signature,
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
+        user_id=current_user.id if current_user else None,
     )
     return ok("Payment verified and ledger updated successfully", detail.model_dump(by_alias=True))
 
@@ -378,6 +380,7 @@ async def verify_contribution_payment(
         payment_id=body.payment_id,
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
+        user_id=current_user.id if current_user else None,
     )
     return ok("Contribution payment verified successfully", result)
 
@@ -497,6 +500,7 @@ async def verify_payment(
             payment_id=body.payment_id,
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
+            user_id=current_user.id if current_user else None,
         )
         return ok("Payment verified successfully", result)
 

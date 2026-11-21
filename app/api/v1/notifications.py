@@ -134,9 +134,48 @@ async def send_notification(
         sent_at=_now(),
     )
     await db.flush()
+
+    if body.recipient_id:
+        try:
+            from app.services.notification_service import send_push_notification_to_user
+
+            push_data = {
+                "notification_id": str(notification.id),
+                "notification_type": body.notification_type,
+                "entity_type": body.entity_type or "",
+                "entity_id": str(body.entity_id) if body.entity_id else "",
+            }
+            await send_push_notification_to_user(
+                db,
+                body.recipient_id,
+                title=body.title,
+                body=body.body or "",
+                data=push_data,
+            )
+        except Exception:
+            pass
+
     return created(
         "Notification sent successfully", NotificationOut.model_validate(notification)
     )
+
+
+@router.post("/test-push")
+async def test_push_notification(current_user: CurrentUser, db: DBSession):
+    """Send a test FCM push notification to the logged-in user's active devices."""
+    from app.services.notification_service import send_push_notification_to_user
+
+    count = await send_push_notification_to_user(
+        db,
+        current_user.id,
+        title="JSSG Push Notification Test",
+        body="This is a test notification to verify your device FCM setup.",
+        data={
+            "category": "test",
+            "notification_type": "TEST",
+        },
+    )
+    return ok(f"Test push notification dispatched to {count} device(s)")
 
 
 @router.post("/broadcast", dependencies=[SEND])

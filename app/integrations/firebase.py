@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import threading
 from typing import Any
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
-from firebase_admin import credentials
+from firebase_admin import credentials, messaging
 
 from app.config import FIREBASE_PROJECT_ID, get_settings
 from app.core.exceptions import UnauthorizedException
+
+logger = logging.getLogger(__name__)
 
 _APP: firebase_admin.App | None = None
 _APP_LOCK = threading.Lock()
@@ -65,8 +69,22 @@ def _get_app() -> firebase_admin.App:
                 options={"projectId": FIREBASE_PROJECT_ID},
                 name=_APP_NAME,
             )
+        # Also ensure default app is initialized so any direct messaging calls work
+        if firebase_admin._DEFAULT_APP_NAME not in firebase_admin._apps:
+            try:
+                firebase_admin.initialize_app(
+                    cert,
+                    options={"projectId": FIREBASE_PROJECT_ID},
+                )
+            except ValueError:
+                pass
         _APP = app
         return _APP
+
+
+def get_firebase_app() -> firebase_admin.App:
+    """Public accessor to obtain the initialized Firebase App instance."""
+    return _get_app()
 
 
 def verify_id_token(id_token: str) -> dict[str, Any]:
@@ -81,3 +99,89 @@ def verify_id_token(id_token: str) -> dict[str, Any]:
         raise
     except Exception:
         raise UnauthorizedException("Invalid or expired Firebase ID token") from None
+
+
+def send_fcm_push(
+    device_token: str,
+    title: str,
+    body: str,
+    data: dict[str, Any] | None = None,
+) -> bool:
+    """Sends an FCM push notification to a specific device token.
+
+    Works when app is closed, in background, or in foreground.
+    Never raises an exception so primary workflows are never disrupted.
+    """
+    if not device_token or not device_token.strip():
+        logger.warning("FCM Push skipped: empty device_token")
+        return False
+
+    if not firebase_configured():
+        logger.warning("FCM Push skipped: Firebase is not configured on the server")
+        return False
+
+    try:
+        app = _get_app()
+    except Exception as exc:
+        logger.error("FCM Push failed: unable to get Firebase app: %s", exc)
+        return False
+
+    try:
+        # Convert all data dictionary values to string (FCM requirement)
+        string_data = {
+            str(k): str(v)
+            for k, v in (data or {}).items()
+            if v is not None
+        }
+
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+            data=string_data,
+            token=device_token,
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(
+                    channel_id="high_importance_channel",
+                    sound="default",
+                    default_sound=True,
+                    default_vibrate_timings=True,
+                ),
+            ),
+            apns=messaging.APNSConfig(
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(
+                        sound="default",
+                        badge=1,
+                    )
+                )
+            ),
+        )
+        response = messaging.send(message, app=app)
+        logger.info("FCM Push sent successfully: %s", response)
+        return True
+    except messaging.UnregisteredError:
+        logger.warning(
+            "FCM Push failed: device token is unregistered or expired: %s...",
+            (device_token or "")[:15],
+        )
+        return False
+    except Exception as e:
+        logger.error(
+            "FCM Push failed for token %s...: %s",
+            (device_token or "")[:15],
+            e,
+        )
+        return False
+
+
+async def send_fcm_push_async(
+    device_token: str,
+    title: str,
+    body: str,
+    data: dict[str, Any] | None = None,
+) -> bool:
+    """Asynchronously sends an FCM push notification without blocking the asyncio loop."""
+    return await asyncio.to_thread(send_fcm_push, device_token, title, body, data)

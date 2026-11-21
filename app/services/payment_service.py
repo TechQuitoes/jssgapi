@@ -385,6 +385,7 @@ class PaymentService:
         razorpay_signature: str,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        user_id: uuid.UUID | None = None,
     ) -> GroupPaymentDetailOut:
         """Verify Super Admin checkout response, capture payment via Razorpay API, and credit common ledger."""
         # 1. Signature verification
@@ -476,7 +477,7 @@ class PaymentService:
                 receipt_no=razorpay_payment_id,
                 transaction_id=razorpay_payment_id,
                 order_id=razorpay_order_id,
-                recipient_id=None,
+                recipient_id=user_id,
                 payment_id=payment.id,
                 link="/admin/payments",
             )
@@ -1373,6 +1374,7 @@ class PaymentService:
         payment_id: uuid.UUID | None = None,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        user_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Verify Razorpay payment signature for group fee payment (Flutter app flow).
 
@@ -1496,7 +1498,7 @@ class PaymentService:
                 receipt_no=razorpay_payment_id,
                 transaction_id=razorpay_payment_id,
                 order_id=razorpay_order_id,
-                recipient_id=None,
+                recipient_id=user_id,
                 payment_id=payment.id,
                 sent_at=paid_at,
                 link="/admin/payments",
@@ -1763,6 +1765,7 @@ class PaymentService:
         payment_id: uuid.UUID | None = None,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        user_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Verify Razorpay payment signature for voluntary contribution."""
         from app.schemas.payment import ContributionVerifyResponse
@@ -1879,14 +1882,23 @@ class PaymentService:
                 if grp:
                     group_name = grp.name
 
-            member_user_id = None
-            if payment.member_id:
+            member_user_id = user_id
+            if not member_user_id and payment.member_id:
                 m_res = await self.session.execute(select(Member).where(Member.id == payment.member_id).limit(1))
                 m = m_res.scalar_one_or_none()
                 if m:
                     member_user_id = m.user_id
                     if not donor_name:
                         donor_name = f"{m.first_name} {m.last_name or ''}".strip()
+
+            if not member_user_id and current_meta and current_meta.get("donor_user_id"):
+                try:
+                    member_user_id = uuid.UUID(str(current_meta.get("donor_user_id")))
+                except Exception:
+                    pass
+
+            if not donor_name and current_meta and current_meta.get("donor_name"):
+                donor_name = current_meta.get("donor_name")
 
             await create_payment_notification(
                 self.session,

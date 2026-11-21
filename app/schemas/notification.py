@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 class DeviceTokenRegister(BaseModel):
     token: str
-    platform: str
+    platform: str = "android"
     device_name: str | None = None
 
 
