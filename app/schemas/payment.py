@@ -42,11 +42,16 @@ class PaymentOut(BaseModel):
 
     id: UUID
     member_id: UUID | None = None
+    group_id: UUID | None = None
+    group_name: str | None = None
+    total_members: int | None = None
+    total_amount: Decimal | None = None
     fee_id: UUID | None = None
     order_id: str
     amount: Decimal
     currency: str
     status: str
+    workflow: str | None = None
     provider: str
     provider_reference: str | None = None
     paid_at: datetime | None = None
@@ -68,6 +73,7 @@ class PaymentCreateResponse(BaseModel):
     amount: Decimal
     currency: str
     status: str
+    workflow: str | None = None
     provider: str
     created_at: datetime
 

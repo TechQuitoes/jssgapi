@@ -465,6 +465,24 @@ class PaymentService:
             user_agent=user_agent,
         )
 
+        try:
+            from app.services.notification_service import create_payment_notification
+
+            await create_payment_notification(
+                self.session,
+                category="group_payment",
+                amount=captured_amount,
+                group_name=obligation.group_name or f"Group {group_id}",
+                receipt_no=razorpay_payment_id,
+                transaction_id=razorpay_payment_id,
+                order_id=razorpay_order_id,
+                recipient_id=None,
+                payment_id=payment.id,
+                link="/admin/payments",
+            )
+        except Exception as exc:
+            logger.warning("Failed to create group checkout notification: %s", exc)
+
         await self.session.flush()
         return await self.get_group_obligation_detail(group_id, obligation.billing_period)
 
@@ -1461,6 +1479,31 @@ class PaymentService:
             user_agent=user_agent,
         )
 
+        try:
+            from app.services.notification_service import create_payment_notification
+
+            group_name = None
+            if payment.group_id:
+                grp = await self.groups.get_by_id(payment.group_id)
+                if grp:
+                    group_name = grp.name
+
+            await create_payment_notification(
+                self.session,
+                category="group_payment",
+                amount=captured_amount,
+                group_name=group_name,
+                receipt_no=razorpay_payment_id,
+                transaction_id=razorpay_payment_id,
+                order_id=razorpay_order_id,
+                recipient_id=None,
+                payment_id=payment.id,
+                sent_at=paid_at,
+                link="/admin/payments",
+            )
+        except Exception as exc:
+            logger.warning("Failed to create group fee notification: %s", exc)
+
         await self.session.flush()
 
         response = GroupFeeVerifyResponse(
@@ -1826,6 +1869,43 @@ class PaymentService:
             ip_address=ip_address,
             user_agent=user_agent,
         )
+
+        try:
+            from app.services.notification_service import create_payment_notification
+
+            group_name = None
+            if payment.group_id:
+                grp = await self.groups.get_by_id(payment.group_id)
+                if grp:
+                    group_name = grp.name
+
+            member_user_id = None
+            if payment.member_id:
+                m_res = await self.session.execute(select(Member).where(Member.id == payment.member_id).limit(1))
+                m = m_res.scalar_one_or_none()
+                if m:
+                    member_user_id = m.user_id
+                    if not donor_name:
+                        donor_name = f"{m.first_name} {m.last_name or ''}".strip()
+
+            await create_payment_notification(
+                self.session,
+                category="contribution",
+                amount=captured_amount,
+                donor_name=donor_name,
+                group_name=group_name,
+                purpose=purpose or "Voluntary Contribution",
+                receipt_no=razorpay_payment_id,
+                transaction_id=razorpay_payment_id,
+                order_id=razorpay_order_id,
+                recipient_id=member_user_id,
+                payment_id=payment.id,
+                sent_at=paid_at,
+                link="/admin/contributions",
+            )
+        except Exception as exc:
+            logger.warning("Failed to create contribution notification: %s", exc)
+
         await self.session.flush()
 
         response = ContributionVerifyResponse(
@@ -2020,6 +2100,34 @@ class PaymentService:
             provider_metadata=json.dumps(meta),
             workflow=PaymentWorkflow.MEMBER_CONTRIBUTION.value,
         )
+
+        try:
+            from app.services.notification_service import create_payment_notification
+
+            member_user_id = None
+            if member_id:
+                m_res = await self.session.execute(select(Member).where(Member.id == member_id).limit(1))
+                m = m_res.scalar_one_or_none()
+                if m:
+                    member_user_id = m.user_id
+
+            await create_payment_notification(
+                self.session,
+                category="contribution",
+                amount=amount,
+                donor_name=donor_name or member_name,
+                group_name=group_name,
+                purpose=purpose or "General Contribution",
+                receipt_no=receipt_code,
+                transaction_id=txn_ref,
+                order_id=order_code,
+                recipient_id=member_user_id,
+                payment_id=payment.id,
+                sent_at=pay_time,
+                link="/admin/contributions",
+            )
+        except Exception as exc:
+            logger.warning("Failed to create manual contribution notification: %s", exc)
 
         return {
             "id": str(payment.id),

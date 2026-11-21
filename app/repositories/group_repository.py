@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import String, and_, case, cast, func, or_, select, update
+from sqlalchemy import String, and_, case, cast, delete, func, or_, select, update
 
 from app.models.fee import Fee
 from app.models.group import SocialGroup
+from app.models.group_payment_obligation import GroupPaymentObligation
 from app.models.location import Location
 from app.models.media import Media
 from app.models.member import Member
@@ -302,9 +303,19 @@ class GroupRepository(BaseRepository[SocialGroup]):
 
         await detach_group(self.session, group.id)
         for model in CASCADE_DEPENDENT_MODELS:
+            if model is Trustee:
+                continue
             await self.session.execute(
                 update(model).where(model.group_id == group.id).values(group_id=None)
             )
+        await self.session.execute(
+            delete(Trustee).where(Trustee.group_id == group.id)
+        )
+        await self.session.execute(
+            update(GroupPaymentObligation)
+            .where(GroupPaymentObligation.group_id == group.id)
+            .values(group_id=None)
+        )
         await self.session.delete(group)
         await self.session.flush()
 

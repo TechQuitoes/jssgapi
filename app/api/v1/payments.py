@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import json
 import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.core.exceptions import NotFoundException
 from app.core.permissions import Permission
 from app.core.responses import created, ok, paginated
 from app.dependencies import CurrentUser, DBSession, require_permission
+from app.models.member import Member
 from app.models.payment import Payment
+from app.repositories.group_repository import GroupRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.schemas.group_payment import (
     GroupCheckoutOrderCreateRequest,
@@ -194,23 +198,95 @@ async def create_group_payment_link(
     return created("Group payment link created successfully", link_res.model_dump())
 
 
+async def _serialize_payments_with_group_info(
+    db, payments: list[Payment]
+) -> list[PaymentOut]:
+    if not payments:
+        return []
+
+    # Collect group_ids to batch query member counts if not in snapshot
+    group_ids: set[UUID] = set()
+    for p in payments:
+        gid = p.group_id or (p.obligation.group_id if p.obligation else None) or (p.member.group_id if p.member else None)
+        if gid:
+            group_ids.add(gid)
+
+    counts_map = await GroupRepository(db).get_member_counts(list(group_ids)) if group_ids else {}
+
+    serialized: list[PaymentOut] = []
+    for p in payments:
+        gid = p.group_id or (p.obligation.group_id if p.obligation else None) or (p.member.group_id if p.member else None)
+        gname: str | None = None
+        if p.obligation and p.obligation.group_name:
+            gname = p.obligation.group_name
+        elif p.group and p.group.name:
+            gname = p.group.name
+        elif p.member and p.member.group and p.member.group.name:
+            gname = p.member.group.name
+
+        if not gname and p.provider_metadata:
+            try:
+                meta = json.loads(p.provider_metadata) if isinstance(p.provider_metadata, str) else p.provider_metadata
+                donor = meta.get("donor_name")
+                purpose = meta.get("purpose")
+                if donor:
+                    gname = f"{donor}"
+                elif purpose:
+                    gname = f"{purpose}"
+            except Exception:
+                pass
+
+        total_members: int | None = None
+        if p.obligation and p.obligation.member_count_snapshot is not None:
+            total_members = p.obligation.member_count_snapshot
+        elif gid:
+            total_members = counts_map.get(gid)
+
+        total_amount = None
+        if p.obligation and p.obligation.expected_amount is not None:
+            total_amount = p.obligation.expected_amount
+        else:
+            total_amount = p.amount
+
+        out = PaymentOut.model_validate(p)
+        out.group_id = gid
+        out.group_name = gname
+        out.total_members = total_members
+        out.total_amount = total_amount
+        serialized.append(out)
+
+    return serialized
+
+
 @router.get("", dependencies=[READ])
 async def list_payments(
     db: DBSession,
     member_id: UUID | None = Query(default=None),
+    group_only: bool = Query(default=False),
+    workflow: str | None = Query(default=None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
-    repo = PaymentRepository(db)
+    stmt = (
+        select(Payment)
+        .options(
+            selectinload(Payment.group),
+            selectinload(Payment.obligation),
+            selectinload(Payment.member).selectinload(Member.group),
+        )
+    )
     if member_id:
-        items = await repo.list_for_member(
-            member_id, limit=page_size, offset=(page - 1) * page_size
+        stmt = stmt.where(Payment.member_id == member_id)
+    if group_only:
+        stmt = stmt.where(
+            or_(
+                Payment.obligation_id.isnot(None),
+                Payment.workflow.in_(["SUPER_ADMIN_CHECKOUT", "GROUP_ADMIN_PAYMENT_LINK"]),
+            )
         )
-        return ok(
-            "Payments fetched successfully",
-            [PaymentOut.model_validate(p) for p in items],
-        )
-    stmt = select(Payment)
+    elif workflow:
+        stmt = stmt.where(Payment.workflow == workflow)
+
     total = (
         await db.execute(select(func.count()).select_from(stmt.subquery()))
     ).scalar_one()
@@ -220,9 +296,12 @@ async def list_payments(
         .offset((page - 1) * page_size)
     )
     items = list(result.scalars().all())
+    serialized = await _serialize_payments_with_group_info(db, items)
+    if member_id:
+        return ok("Payments fetched successfully", serialized)
     return paginated(
         "Payments fetched successfully",
-        [PaymentOut.model_validate(p) for p in items],
+        serialized,
         {
             "page": page,
             "page_size": page_size,
@@ -374,10 +453,21 @@ async def create_payment(body: PaymentCreate, current_user: CurrentUser, db: DBS
 
 @router.get("/{payment_id}", dependencies=[READ])
 async def get_payment(payment_id: UUID, db: DBSession):
-    payment = await PaymentRepository(db).get_by_id(payment_id)
+    stmt = (
+        select(Payment)
+        .where(Payment.id == payment_id)
+        .options(
+            selectinload(Payment.group),
+            selectinload(Payment.obligation),
+            selectinload(Payment.member).selectinload(Member.group),
+        )
+    )
+    res = await db.execute(stmt)
+    payment = res.scalar_one_or_none()
     if payment is None:
         raise NotFoundException("Payment", str(payment_id))
-    return ok("Payment fetched successfully", PaymentOut.model_validate(payment))
+    serialized = await _serialize_payments_with_group_info(db, [payment])
+    return ok("Payment fetched successfully", serialized[0])
 
 
 @router.post("/verify")

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from app.core.exceptions import NotFoundException
 from app.core.permissions import Permission
 from app.core.responses import created, ok, paginated
-from app.dependencies import CurrentUser, DBSession, require_permission
+from app.dependencies import CurrentUser, DBSession, OptionalUser, require_permission
 from app.models.notification import DeviceToken, Notification
 from app.repositories.notification_repository import (
     DeviceTokenRepository,
@@ -79,19 +79,21 @@ async def remove_device(token_id: UUID, current_user: CurrentUser, db: DBSession
 
 @router.get("")
 async def list_notifications(
-    current_user: CurrentUser,
     db: DBSession,
+    current_user: OptionalUser = None,
+    category: str | None = Query(default=None, description="Filter by category: contribution, group_payment, ad_payment, payment, or all"),
     unread_only: bool = Query(default=False),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
     repo = NotificationRepository(db)
-    if unread_only:
+    user_id = current_user.id if current_user else None
+    if unread_only and user_id is not None:
         items = await repo.list_for_user(
-            current_user.id, limit=page_size, offset=(page - 1) * page_size
+            user_id, limit=page_size, offset=(page - 1) * page_size, category=category
         )
         items = [n for n in items if not n.is_read]
-        unseen = await repo.count_unread(current_user.id)
+        unseen = await repo.count_unread(user_id, category=category)
         return ok(
             "Unread notifications fetched successfully",
             {
@@ -100,19 +102,18 @@ async def list_notifications(
             },
         )
     items = await repo.list_for_user(
-        current_user.id, limit=page_size, offset=(page - 1) * page_size
+        user_id, limit=page_size, offset=(page - 1) * page_size, category=category
     )
-    unseen = await repo.count_unread(current_user.id)
+    total = await repo.count_for_user(user_id, category=category)
+    total_pages = (total + page_size - 1) // page_size if total > 0 else 0
     return paginated(
         "Notifications fetched successfully",
         [NotificationOut.model_validate(n) for n in items],
         {
             "page": page,
             "page_size": page_size,
-            "total": unseen or len(items),
-            "total_pages": (unseen + page_size - 1) // page_size
-            if unseen
-            else (len(items) + page_size - 1) // page_size,
+            "total": total,
+            "total_pages": total_pages,
         },
     )
 
@@ -142,24 +143,18 @@ async def send_notification(
 async def broadcast_notification(
     body: NotificationBroadcastRequest, db: DBSession, current_user: CurrentUser
 ):
-    result = await db.execute(select(DeviceToken.user_id).distinct())
-    user_ids = [row[0] for row in result.all()]
     repo = NotificationRepository(db)
-    notifications = []
-    for uid in user_ids:
-        notifications.append(
-            await repo.create(
-                recipient_id=uid,
-                title=body.title,
-                body=body.body,
-                notification_type=body.notification_type,
-                sent_at=_now(),
-            )
-        )
+    notification = await repo.create(
+        recipient_id=None,
+        title=body.title,
+        body=body.body,
+        notification_type=body.notification_type,
+        sent_at=_now(),
+    )
     await db.flush()
     return ok(
         "Notification broadcast to recipients",
-        [NotificationOut.model_validate(n) for n in notifications],
+        NotificationOut.model_validate(notification),
     )
 
 
@@ -169,7 +164,10 @@ async def get_notification(
 ):
     repo = NotificationRepository(db)
     notification = await repo.get_by_id(notification_id)
-    if notification is None or notification.recipient_id != current_user.id:
+    if (
+        notification is None
+        or (notification.recipient_id is not None and notification.recipient_id != current_user.id)
+    ):
         raise NotFoundException("Notification", str(notification_id))
     return ok(
         "Notification fetched successfully",
@@ -183,7 +181,10 @@ async def mark_notification_read(
 ):
     repo = NotificationRepository(db)
     notification = await repo.get_by_id(notification_id)
-    if notification is None or notification.recipient_id != current_user.id:
+    if (
+        notification is None
+        or (notification.recipient_id is not None and notification.recipient_id != current_user.id)
+    ):
         raise NotFoundException("Notification", str(notification_id))
     if not notification.is_read:
         notification.is_read = True
@@ -197,10 +198,14 @@ async def mark_notification_read(
 
 @router.post("/read-all")
 async def mark_all_read(current_user: CurrentUser, db: DBSession):
-    NotificationRepository(db)
+    from sqlalchemy import or_
+
     result = await db.execute(
         select(Notification).where(
-            Notification.recipient_id == current_user.id,
+            or_(
+                Notification.recipient_id == current_user.id,
+                Notification.recipient_id.is_(None),
+            ),
             Notification.is_read.is_(False),
         )
     )

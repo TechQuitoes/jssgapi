@@ -792,6 +792,26 @@ async def verify_ad_payment(
     ad.payment_status = "PAID"
     ad.status = AdvertisementStatus.APPROVED.value
     ad.is_active = True
+
+    try:
+        from decimal import Decimal
+        from app.services.notification_service import create_payment_notification
+
+        await create_payment_notification(
+            db,
+            category="ad_payment",
+            amount=Decimal(str(ad.total_amount or 0)),
+            purpose=ad.title,
+            receipt_no=body.razorpay_payment_id,
+            transaction_id=body.razorpay_payment_id,
+            order_id=body.razorpay_order_id,
+            recipient_id=current_user.id if current_user else None,
+            payment_id=ad.id,
+            link="/admin/advertisements",
+        )
+    except Exception as exc:
+        logger.warning("Failed to create ad payment notification: %s", exc)
+
     await db.flush()
     await db.refresh(ad)
 
@@ -900,6 +920,26 @@ async def record_ad_manual_payment(
     ad.payment_status = "PAID"
     ad.status = AdvertisementStatus.APPROVED.value
     ad.is_active = True
+
+    try:
+        from decimal import Decimal
+        from app.services.notification_service import create_payment_notification
+
+        await create_payment_notification(
+            db,
+            category="ad_payment",
+            amount=Decimal(str(ad.total_amount or 0)),
+            purpose=ad.title,
+            receipt_no=body.razorpay_payment_id,
+            transaction_id=body.razorpay_payment_id,
+            order_id=body.razorpay_order_id,
+            recipient_id=current_user.id if current_user else None,
+            payment_id=ad.id,
+            link="/admin/advertisements",
+        )
+    except Exception as exc:
+        logger.warning("Failed to create ad payment notification: %s", exc)
+
     await db.flush()
     await db.refresh(ad)
 

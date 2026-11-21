@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class DeviceTokenRegister(BaseModel):
@@ -54,7 +56,7 @@ class NotificationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    recipient_id: UUID
+    recipient_id: UUID | None = None
     title: str
     body: str | None = None
     data: str | None = None
@@ -66,3 +68,34 @@ class NotificationOut(BaseModel):
     sent_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+    category: str | None = None
+    amount: float | None = None
+    donor_name: str | None = None
+    group_name: str | None = None
+    receipt_no: str | None = None
+    transaction_id: str | None = None
+    order_id: str | None = None
+    link: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_meta_fields(cls, data: Any) -> Any:
+        raw_data = getattr(data, "data", None) if not isinstance(data, dict) else data.get("data")
+        if raw_data and isinstance(raw_data, str):
+            try:
+                parsed = json.loads(raw_data)
+                if isinstance(parsed, dict):
+                    if isinstance(data, dict):
+                        for k, v in parsed.items():
+                            if k not in data or data[k] is None:
+                                data[k] = v
+                        return data
+                    elif hasattr(data, "__table__"):
+                        d = {c.name: getattr(data, c.name, None) for c in data.__table__.columns}
+                        for k, v in parsed.items():
+                            d[k] = v
+                        return d
+            except Exception:
+                pass
+        return data

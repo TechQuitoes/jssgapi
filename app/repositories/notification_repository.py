@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from uuid import UUID
+
+from sqlalchemy import func, or_, select
 
 from app.models.notification import DeviceToken, Notification
 from app.repositories.base_repository import BaseRepository
@@ -9,25 +11,61 @@ from app.repositories.base_repository import BaseRepository
 class NotificationRepository(BaseRepository[Notification]):
     model = Notification
 
+    def _apply_filters(self, user_id: UUID | None, category: str | None = None):
+        conds = []
+        if user_id is not None:
+            conds.append(
+                or_(
+                    Notification.recipient_id == user_id,
+                    Notification.recipient_id.is_(None),
+                )
+            )
+        else:
+            conds.append(Notification.recipient_id.is_(None))
+
+        if category and category.lower() not in ("all", "all received"):
+            cat_lower = category.lower()
+            cat_upper = category.upper()
+            conds.append(
+                or_(
+                    Notification.notification_type == cat_upper,
+                    Notification.notification_type == cat_lower,
+                    Notification.data.like(f'%"category": "{cat_lower}"%'),
+                )
+            )
+        return conds
+
     async def list_for_user(
-        self, user_id, limit: int, offset: int
+        self, user_id: UUID | None, limit: int, offset: int, category: str | None = None
     ) -> list[Notification]:
+        filters = self._apply_filters(user_id, category)
         result = await self.session.execute(
             select(Notification)
-            .where(Notification.recipient_id == user_id)
-            .order_by(Notification.created_at.desc())
+            .where(*filters)
+            .order_by(Notification.sent_at.desc().nullslast(), Notification.created_at.desc())
             .limit(limit)
             .offset(offset)
         )
         return list(result.scalars().all())
 
-    async def count_unread(self, user_id) -> int:
+    async def count_for_user(self, user_id: UUID | None, category: str | None = None) -> int:
+        filters = self._apply_filters(user_id, category)
         result = await self.session.execute(
-            select(Notification).where(
-                Notification.recipient_id == user_id, Notification.is_read.is_(False)
+            select(func.count(Notification.id)).where(*filters)
+        )
+        return result.scalar() or 0
+
+    async def count_unread(self, user_id: UUID | None, category: str | None = None) -> int:
+        if user_id is None:
+            return 0
+        filters = self._apply_filters(user_id, category)
+        result = await self.session.execute(
+            select(func.count(Notification.id)).where(
+                *filters,
+                Notification.is_read.is_(False),
             )
         )
-        return len(list(result.scalars().all()))
+        return result.scalar() or 0
 
 
 class DeviceTokenRepository(BaseRepository[DeviceToken]):

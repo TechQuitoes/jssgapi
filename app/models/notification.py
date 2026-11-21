@@ -39,10 +39,10 @@ class DeviceToken(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 class Notification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "notifications"
 
-    recipient_id: Mapped[uuid.UUID] = mapped_column(
+    recipient_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -65,7 +65,7 @@ class Notification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
 
-    recipient: Mapped[User] = relationship()
+    recipient: Mapped[User | None] = relationship()
 
     def __repr__(self) -> str:
         return f"<Notification {self.title}>"
