@@ -93,6 +93,15 @@ async def get_access_scope(db: AsyncSession, user: User) -> AccessScope:
         user._cached_access_scope = scope
         return scope
 
+    if role is RoleName.GUEST:
+        scope = AccessScope(
+            unrestricted=False,
+            group_id=None,
+            member_id=member.id if member is not None else None,
+        )
+        user._cached_access_scope = scope
+        return scope
+
     raise ForbiddenException("Operation not allowed for this role")
 
 

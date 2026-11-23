@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac as hmac_module
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -232,15 +235,122 @@ class AuthService:
             "tokens": None,
         }
 
+    async def register_guest(
+        self,
+        *,
+        full_name: str,
+        phone_number: str,
+        password: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> dict:
+        """Register a new user with the GUEST role. Requires Super Admin approval."""
+        full_name = full_name.strip()
+        if not full_name:
+            raise BadRequestException("Full name cannot be empty")
+
+        verified_phone = normalize_phone_number(phone_number)
+
+        phone_in_use, _ = await self.members.check_phone_in_use(verified_phone)
+        if phone_in_use:
+            raise AlreadyExistsException(
+                "This phone number is already registered or in use by another member."
+            )
+        if await self.users.get_by_phone(verified_phone):
+            raise AlreadyExistsException(
+                "This phone number is already registered."
+            )
+
+        role_row = await Role.get_or_create(
+            self.session, RoleName.GUEST, "Guest user with limited view access"
+        )
+
+        user = await self.users.create(
+            email=None,
+            full_name=full_name,
+            phone_number=verified_phone,
+            password_hash=hash_password(password),
+            is_active=False,
+            is_phone_verified=True,
+            role_id=role_row.id,
+            group_id=None,
+        )
+
+        name_parts = full_name.strip().split(maxsplit=1)
+        first_name = name_parts[0]
+        last_name = name_parts[1] if len(name_parts) > 1 else name_parts[0]
+
+        profile_data: dict[str, Any] = {
+            "full_name": full_name,
+            "phone": verified_phone,
+            "tag": "GUEST",
+            "role": "GUEST",
+        }
+
+        member = await self.members.create(
+            user_id=user.id,
+            group_id=None,
+            first_name=first_name,
+            last_name=last_name,
+            contact_phone=verified_phone,
+            membership_status=MemberStatus.PENDING.value,
+            profile_data=profile_data,
+        )
+
+        await self.audit.log(
+            AuditAction.REGISTER,
+            user_id=user.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        await self.session.flush()
+
+        try:
+            from app.services.notification_service import (
+                get_admin_user_ids,
+                send_push_notification_to_user,
+            )
+
+            admin_ids = await get_admin_user_ids(self.session, group_id=None)
+            for admin_id in admin_ids:
+                await send_push_notification_to_user(
+                    self.session,
+                    user_id=admin_id,
+                    title="New Guest Registration",
+                    body=f"{full_name} ({verified_phone}) has requested Guest access [Tag: GUEST]",
+                    data={
+                        "type": "GUEST_REGISTRATION",
+                        "member_id": str(member.id),
+                        "user_id": str(user.id),
+                        "tag": "GUEST",
+                    },
+                )
+        except Exception as exc:
+            logger.warning("Failed to send guest registration notification to Super Admins: %s", exc)
+
+        return {
+            "user": user,
+            "message": "Your registration as Guest has been submitted successfully and is pending approval by Super Admin.",
+            "tokens": None,
+        }
+
     async def _assert_user_approved(self, user: User) -> None:
         member = await self.members.get_by_user_id(user.id)
+        is_guest = False
+        if user.role and resolve_role_name(user.role.name) == RoleName.GUEST:
+            is_guest = True
+        elif member and ((member.profile_data or {}).get("tag") == "GUEST" or (member.profile_data or {}).get("role") == "GUEST"):
+            is_guest = True
+
+        approver = "the Super Admin" if is_guest else "the Group Admin"
+
         if member is not None:
             if member.membership_status == MemberStatus.REJECTED.value:
                 reason = member.rejection_reason
                 detail = (
                     f"Your registration has been rejected. Reason: {reason}"
                     if reason
-                    else "Your registration has been rejected by the Group Admin."
+                    else f"Your registration has been rejected by {approver}."
                 )
                 raise ForbiddenException(detail)
             if (
@@ -248,15 +358,15 @@ class AuthService:
                 or not user.is_active
             ):
                 raise ForbiddenException(
-                    "Your registration is pending approval by the Group Admin. Please wait for approval before logging in."
+                    f"Your registration is pending approval by {approver}. Please wait for approval before logging in."
                 )
             if member.membership_status != MemberStatus.APPROVED.value:
                 raise ForbiddenException(
-                    "Your registration is pending approval by the Group Admin. Please wait for approval before logging in."
+                    f"Your registration is pending approval by {approver}. Please wait for approval before logging in."
                 )
         elif not user.is_active:
             raise ForbiddenException(
-                "Your registration is pending approval by the Group Admin. Please wait for approval before logging in."
+                f"Your registration is pending approval by {approver}. Please wait for approval before logging in."
             )
 
     async def _login_existing_firebase_user(
@@ -306,9 +416,13 @@ class AuthService:
             role_name = RoleName.MEMBER.value
         else:
             candidate = role.strip().upper()
-            if candidate != RoleName.SUPER_ADMIN.value:
+            if candidate not in (
+                RoleName.SUPER_ADMIN.value,
+                RoleName.MEMBER.value,
+                RoleName.GUEST.value,
+            ):
                 raise BadRequestException(
-                    "Invalid role. Allowed roles: MEMBER, SUPER_ADMIN"
+                    "Invalid role. Allowed roles: MEMBER, SUPER_ADMIN, GUEST"
                 )
             role_name = candidate
         role_result = await self.session.execute(

@@ -4,9 +4,9 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, or_, select
 
-from app.core.constants import AuditAction, MemberStatus, RoleName
+from app.core.constants import AuditAction, MemberStatus, RoleName, resolve_role_name
 from app.core.exceptions import (
     AlreadyExistsException,
     BadRequestException,
@@ -86,6 +86,18 @@ def _member_out(member: Member) -> MemberOut:
     out.social_group_association_name = raw_profile_group or out.group_name
     out.member_id = member.id
     out.status = member.membership_status
+
+    is_guest = (
+        (member.profile_data or {}).get("tag") == "GUEST"
+        or (member.profile_data or {}).get("role") == "GUEST"
+        or (
+            hasattr(member, "user")
+            and member.user
+            and member.user.role
+            and resolve_role_name(member.user.role.name) == RoleName.GUEST
+        )
+    )
+    out.tag = "GUEST" if is_guest else "MEMBER"
     return out
 
 
@@ -121,6 +133,7 @@ def _member_list_item(member: Member, profiles: ProfileService) -> MemberListIte
         merged["social_group_name"] = merged["social_group_association_name"]
     if primary_info.get("membership_number"):
         merged["membership_number"] = primary_info["membership_number"]
+    merged["tag"] = out_dict.get("tag") or ("GUEST" if (member.profile_data or {}).get("tag") == "GUEST" else "MEMBER")
     return MemberListItemOut(**merged)
 
 
@@ -211,6 +224,11 @@ async def list_members(
         description="Only the members holding this exact group designation "
         "(case-insensitive).",
     ),
+    tag: str | None = Query(
+        default=None,
+        max_length=50,
+        description="Filter by tag: GUEST or MEMBER",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
@@ -245,7 +263,7 @@ async def list_members(
         f"scope_m:{scope.member_id or 'none'}:scope_g:{scope.group_id or 'none'}:"
         f"eff_g:{effective_group or 'none'}:gname:{group_name or 'none'}:"
         f"status:{status or 'all'}:q:{query or 'all'}:trustee:{trustee_only}:"
-        f"desig:{designation or 'all'}:page:{page}:size:{page_size}"
+        f"desig:{designation or 'all'}:tag:{tag or 'all'}:page:{page}:size:{page_size}"
     )
     cached = await redis_client.get_json(cache_key)
     if cached is not None:
@@ -265,6 +283,20 @@ async def list_members(
             limit=page_size,
             offset=(page - 1) * page_size,
         )
+        if tag:
+            tag_clean = tag.strip().upper()
+            if tag_clean == "GUEST":
+                members = [
+                    m for m in members
+                    if (m.profile_data or {}).get("tag") == "GUEST"
+                    or (m.profile_data or {}).get("role") == "GUEST"
+                ]
+            elif tag_clean == "MEMBER":
+                members = [
+                    m for m in members
+                    if (m.profile_data or {}).get("tag") != "GUEST"
+                    and (m.profile_data or {}).get("role") != "GUEST"
+                ]
         res = ok(
             "Members fetched successfully",
             [
@@ -293,6 +325,41 @@ async def list_members(
             if v is not None
         },
     )
+    if tag:
+        tag_clean = tag.strip().upper()
+        if tag_clean == "GUEST":
+            stmt = stmt.where(
+                or_(
+                    Member.profile_data["tag"].astext == "GUEST",
+                    Member.profile_data["role"].astext == "GUEST",
+                    Member.user_id.in_(
+                        select(User.id)
+                        .join(Role, User.role_id == Role.id)
+                        .where(Role.name == RoleName.GUEST.value)
+                    ),
+                )
+            )
+        elif tag_clean == "MEMBER":
+            stmt = stmt.where(
+                and_(
+                    or_(
+                        Member.profile_data["tag"].astext.is_(None),
+                        Member.profile_data["tag"].astext != "GUEST",
+                    ),
+                    or_(
+                        Member.profile_data["role"].astext.is_(None),
+                        Member.profile_data["role"].astext != "GUEST",
+                    ),
+                    or_(
+                        Member.user_id.is_(None),
+                        Member.user_id.not_in(
+                            select(User.id)
+                            .join(Role, User.role_id == Role.id)
+                            .where(Role.name == RoleName.GUEST.value)
+                        ),
+                    ),
+                )
+            )
     if group_name:
         stmt = stmt.where(group_name_filter(group_name))
     # The post-holder listing is the member listing narrowed to administrator
@@ -785,7 +852,29 @@ async def approve_member(
     member = await repo.get_by_id(member_id)
     if member is None:
         raise NotFoundException("Member", str(member_id))
-    await assert_member_access(db, current_user, member)
+
+    is_guest = (
+        (member.profile_data or {}).get("tag") == "GUEST"
+        or (member.profile_data or {}).get("role") == "GUEST"
+    )
+    if not is_guest and member.user_id:
+        user_row = await db.get(User, member.user_id)
+        if (
+            user_row
+            and user_row.role
+            and resolve_role_name(user_row.role.name) == RoleName.GUEST
+        ):
+            is_guest = True
+
+    if is_guest:
+        caller_role = (
+            resolve_role_name(current_user.role.name) if current_user.role else None
+        )
+        if caller_role is not RoleName.SUPER_ADMIN:
+            raise ForbiddenException("Only Super Admin can approve Guest registrations.")
+    else:
+        await assert_member_access(db, current_user, member)
+
     if body.status in (
         MemberStatus.APPROVED,
         MemberStatus.REJECTED,
@@ -822,6 +911,22 @@ async def approve_member(
             action, user_id=current_user.id, entity_type="member", entity_id=member.id
         )
         await db.flush()
+
+        if is_guest and body.status == MemberStatus.APPROVED and member.user_id:
+            try:
+                from app.services.notification_service import (
+                    send_push_notification_to_user,
+                )
+
+                await send_push_notification_to_user(
+                    db,
+                    user_id=member.user_id,
+                    title="Account Approved",
+                    body="Your Guest account has been approved by Super Admin. You can now log in.",
+                    data={"type": "GUEST_APPROVED"},
+                )
+            except Exception:
+                pass
     else:
         raise BadRequestException("Use update endpoint for status changes")
     await invalidate_member_cache()

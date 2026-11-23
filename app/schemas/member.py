@@ -242,6 +242,7 @@ class MemberOut(BaseModel):
     membership_number: str | None = None
     membership_status: str
     status: str | None = None
+    tag: str | None = None
     joined_at: datetime | None = None
     approved_at: datetime | None = None
     rejection_reason: str | None = None

@@ -91,6 +91,23 @@ class RegisterRequest(BaseModel):
         return self
 
 
+class RegisterGuestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str = Field(min_length=1, max_length=255)
+    phone_number: str = Field(pattern=r"^[6-9][0-9]{9}$")
+    password: str = Field(min_length=8, max_length=128)
+    confirm_password: str = Field(min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_guest_fields(self) -> RegisterGuestRequest:
+        if not self.full_name.strip():
+            raise ValueError("Full name cannot be empty")
+        if self.password != self.confirm_password:
+            raise ValueError("Passwords do not match")
+        return self
+
+
 class LoginRequest(BaseModel):
     email: str | None = None
     phone_number: str | None = None

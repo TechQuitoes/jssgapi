@@ -211,4 +211,5 @@ def _role_descriptions() -> dict[str, str]:
         RoleName.SUPER_ADMIN.value: "Super administrator with full platform access",
         RoleName.GROUP_ADMIN.value: "Administrator for a single social group",
         RoleName.MEMBER.value: "Registered community member",
+        RoleName.GUEST.value: "Guest user with limited view access",
     }

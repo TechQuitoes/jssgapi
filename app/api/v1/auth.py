@@ -19,6 +19,7 @@ from app.schemas.auth import (
     OtpRequest,
     OtpVerifyRequest,
     RefreshRequest,
+    RegisterGuestRequest,
     RegisterRequest,
     ResetPasswordRequest,
     SendRegisterOtpResponse,
@@ -104,6 +105,29 @@ async def register(body: RegisterRequest, request: Request, db: DBSession):
         spouse_mobile=body.spouse_mobile,
         group_id=body.group_id,
         group_name=body.group_name,
+        ip_address=ip,
+        user_agent=ua,
+    )
+    return AuthResponse(
+        user=UserOut.model_validate(result["user"]),
+        tokens=result.get("tokens"),
+        message=result.get("message"),
+    )
+
+
+@router.post("/register-guest", response_model=AuthResponse)
+async def register_guest(body: RegisterGuestRequest, request: Request, db: DBSession):
+    """Register a new user as a GUEST.
+
+    Account is created in inactive state with pending status and requires
+    approval by the Super Admin before login is allowed.
+    """
+    ip, ua = _request_context(request)
+    service = AuthService(db)
+    result = await service.register_guest(
+        full_name=body.full_name,
+        phone_number=body.phone_number,
+        password=body.password,
         ip_address=ip,
         user_agent=ua,
     )

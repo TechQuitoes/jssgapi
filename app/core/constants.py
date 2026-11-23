@@ -4,16 +4,18 @@ from enum import Enum
 
 
 class RoleName(str, Enum):
-    """The three roles the platform recognises.
+    """The roles the platform recognises.
 
     ``SUPER_ADMIN`` is the only platform-wide administrator (React Admin Panel).
     ``GROUP_ADMIN`` administers exactly one social group (Flutter admin app).
     ``MEMBER`` is the community member (Flutter member app).
+    ``GUEST`` is a registered guest user with limited view access.
     """
 
     SUPER_ADMIN = "SUPER_ADMIN"
     GROUP_ADMIN = "GROUP_ADMIN"
     MEMBER = "MEMBER"
+    GUEST = "GUEST"
 
 
 DEFAULT_USER_PASSWORD = "Pass@1234"

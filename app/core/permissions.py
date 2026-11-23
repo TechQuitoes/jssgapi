@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from app.models.user import User
 
 ROLE_HIERARCHY: dict[RoleName, int] = {
+    RoleName.GUEST: 0,
     RoleName.MEMBER: 1,
     RoleName.GROUP_ADMIN: 2,
     RoleName.SUPER_ADMIN: 3,
@@ -205,6 +206,9 @@ ROLE_PERMISSIONS: dict[RoleName, set[str]] = {
         Permission.NOTIFICATION_READ,
         Permission.ADVERTISEMENT_READ,
         Permission.MEDIA_READ,
+    },
+    RoleName.GUEST: {
+        Permission.ADVERTISEMENT_READ,
     },
 }
 
