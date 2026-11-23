@@ -13,6 +13,7 @@ from app.api.v1.fees import router as fees_router
 from app.api.v1.geo import router as geo_router
 from app.api.v1.group_fees import router as group_fees_router
 from app.api.v1.groups import router as groups_router
+from app.api.v1.guests import router as guests_router
 from app.api.v1.jain_tirths import router as jain_tirths_router
 from app.api.v1.locations import router as locations_router
 from app.api.v1.media import router as media_router
@@ -33,6 +34,7 @@ v1_router = APIRouter()
 for resource_router in [
     auth_router,
     users_router,
+    guests_router,
     locations_router,
     geo_router,
     groups_router,

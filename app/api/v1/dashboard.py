@@ -3,13 +3,14 @@ from __future__ import annotations
 from fastapi import APIRouter
 from sqlalchemy import func, or_, select
 
-from app.core.constants import MemberStatus
+from app.core.constants import MemberStatus, RoleName
 from app.core.redis import redis_client
 from app.core.responses import ok
 from app.dependencies import CurrentUser, DBSession
 from app.models.group import SocialGroup
 from app.models.location import Location
 from app.models.member import Member
+from app.models.user import Role, User
 from app.repositories.member_repository import trustee_role_filter
 from app.schemas.dashboard import DashboardStatisticsOut
 
@@ -38,12 +39,16 @@ async def get_dashboard_statistics(
     if cached is not None:
         return ok("Dashboard statistics fetched successfully", cached)
 
-    # 1. Total members count (Approved, non-deleted)
+    # 1. Total members count (Approved, non-deleted, excluding GUESTs)
     members_subquery = (
         select(func.count(Member.id))
         .where(
             Member.is_deleted.is_(False),
             Member.membership_status == MemberStatus.APPROVED.value,
+            or_(
+                Member.profile_data["tag"].astext.is_(None),
+                Member.profile_data["tag"].astext != "GUEST",
+            ),
         )
         .scalar_subquery()
     )
@@ -97,11 +102,24 @@ async def get_dashboard_statistics(
         .scalar_subquery()
     )
 
+    # 5. Total guests count (Approved, non-deleted users with GUEST role)
+    guests_subquery = (
+        select(func.count(User.id))
+        .join(Role, User.role_id == Role.id)
+        .where(
+            Role.name == RoleName.GUEST.value,
+            User.is_active.is_(True),
+            User.deleted_at.is_(None),
+        )
+        .scalar_subquery()
+    )
+
     stmt = select(
         members_subquery.label("total_members"),
         groups_subquery.label("total_groups"),
         post_holders_subquery.label("total_post_holders"),
         cities_subquery.label("total_cities"),
+        guests_subquery.label("total_guests"),
     )
 
     result = await db.execute(stmt)
@@ -112,6 +130,7 @@ async def get_dashboard_statistics(
         total_groups=row.total_groups or 0,
         total_post_holders=row.total_post_holders or 0,
         total_cities=row.total_cities or 0,
+        total_guests=row.total_guests or 0,
     )
 
     data_dict = data.model_dump()

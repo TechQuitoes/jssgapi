@@ -283,20 +283,18 @@ async def list_members(
             limit=page_size,
             offset=(page - 1) * page_size,
         )
-        if tag:
-            tag_clean = tag.strip().upper()
-            if tag_clean == "GUEST":
-                members = [
-                    m for m in members
-                    if (m.profile_data or {}).get("tag") == "GUEST"
-                    or (m.profile_data or {}).get("role") == "GUEST"
-                ]
-            elif tag_clean == "MEMBER":
-                members = [
-                    m for m in members
-                    if (m.profile_data or {}).get("tag") != "GUEST"
-                    and (m.profile_data or {}).get("role") != "GUEST"
-                ]
+        if tag and tag.strip().upper() == "GUEST":
+            members = [
+                m for m in members
+                if (m.profile_data or {}).get("tag") == "GUEST"
+                or (m.profile_data or {}).get("role") == "GUEST"
+            ]
+        else:
+            members = [
+                m for m in members
+                if (m.profile_data or {}).get("tag") != "GUEST"
+                and (m.profile_data or {}).get("role") != "GUEST"
+            ]
         res = ok(
             "Members fetched successfully",
             [
@@ -360,6 +358,28 @@ async def list_members(
                     ),
                 )
             )
+    else:
+        # By default: list actual members only, do NOT include guests
+        stmt = stmt.where(
+            and_(
+                or_(
+                    Member.profile_data["tag"].astext.is_(None),
+                    Member.profile_data["tag"].astext != "GUEST",
+                ),
+                or_(
+                    Member.profile_data["role"].astext.is_(None),
+                    Member.profile_data["role"].astext != "GUEST",
+                ),
+                or_(
+                    Member.user_id.is_(None),
+                    Member.user_id.not_in(
+                        select(User.id)
+                        .join(Role, User.role_id == Role.id)
+                        .where(Role.name == RoleName.GUEST.value)
+                    ),
+                ),
+            )
+        )
     if group_name:
         stmt = stmt.where(group_name_filter(group_name))
     # The post-holder listing is the member listing narrowed to administrator

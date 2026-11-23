@@ -233,6 +233,12 @@ class ProfileService:
     async def get_profile(self, user_id: UUID) -> ProfileOut:
         member = await self._get_member(user_id)
         if member is None:
+            user = await self.session.get(User, user_id)
+            if user is not None:
+                return ProfileOut(
+                    full_name=user.full_name,
+                    contact_phone=user.phone_number,
+                )
             raise ProfileNotFoundException()
         return self._build_profile(member)
 

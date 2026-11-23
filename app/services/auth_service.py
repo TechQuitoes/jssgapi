@@ -276,27 +276,6 @@ class AuthService:
             group_id=None,
         )
 
-        name_parts = full_name.strip().split(maxsplit=1)
-        first_name = name_parts[0]
-        last_name = name_parts[1] if len(name_parts) > 1 else name_parts[0]
-
-        profile_data: dict[str, Any] = {
-            "full_name": full_name,
-            "phone": verified_phone,
-            "tag": "GUEST",
-            "role": "GUEST",
-        }
-
-        member = await self.members.create(
-            user_id=user.id,
-            group_id=None,
-            first_name=first_name,
-            last_name=last_name,
-            contact_phone=verified_phone,
-            membership_status=MemberStatus.PENDING.value,
-            profile_data=profile_data,
-        )
-
         await self.audit.log(
             AuditAction.REGISTER,
             user_id=user.id,
@@ -308,23 +287,21 @@ class AuthService:
         try:
             from app.services.notification_service import (
                 get_admin_user_ids,
-                send_push_notification_to_user,
+                send_push_notification_to_users,
             )
 
             admin_ids = await get_admin_user_ids(self.session, group_id=None)
-            for admin_id in admin_ids:
-                await send_push_notification_to_user(
-                    self.session,
-                    user_id=admin_id,
-                    title="New Guest Registration",
-                    body=f"{full_name} ({verified_phone}) has requested Guest access [Tag: GUEST]",
-                    data={
-                        "type": "GUEST_REGISTRATION",
-                        "member_id": str(member.id),
-                        "user_id": str(user.id),
-                        "tag": "GUEST",
-                    },
-                )
+            await send_push_notification_to_users(
+                self.session,
+                user_ids=admin_ids,
+                title="New Guest Registration",
+                body=f"{full_name} ({verified_phone}) has requested Guest access [Tag: GUEST]",
+                data={
+                    "type": "GUEST_REGISTRATION",
+                    "user_id": str(user.id),
+                    "tag": "GUEST",
+                },
+            )
         except Exception as exc:
             logger.warning("Failed to send guest registration notification to Super Admins: %s", exc)
 
@@ -335,22 +312,22 @@ class AuthService:
         }
 
     async def _assert_user_approved(self, user: User) -> None:
+        role = resolve_role_name(user.role.name) if user.role else None
+        if role == RoleName.GUEST:
+            if not user.is_active:
+                raise ForbiddenException(
+                    "Your registration is pending approval by the Super Admin. Please wait for approval before logging in."
+                )
+            return
+
         member = await self.members.get_by_user_id(user.id)
-        is_guest = False
-        if user.role and resolve_role_name(user.role.name) == RoleName.GUEST:
-            is_guest = True
-        elif member and ((member.profile_data or {}).get("tag") == "GUEST" or (member.profile_data or {}).get("role") == "GUEST"):
-            is_guest = True
-
-        approver = "the Super Admin" if is_guest else "the Group Admin"
-
         if member is not None:
             if member.membership_status == MemberStatus.REJECTED.value:
                 reason = member.rejection_reason
                 detail = (
                     f"Your registration has been rejected. Reason: {reason}"
                     if reason
-                    else f"Your registration has been rejected by {approver}."
+                    else "Your registration has been rejected by the Group Admin."
                 )
                 raise ForbiddenException(detail)
             if (
@@ -358,15 +335,15 @@ class AuthService:
                 or not user.is_active
             ):
                 raise ForbiddenException(
-                    f"Your registration is pending approval by {approver}. Please wait for approval before logging in."
+                    "Your registration is pending approval by the Group Admin. Please wait for approval before logging in."
                 )
             if member.membership_status != MemberStatus.APPROVED.value:
                 raise ForbiddenException(
-                    f"Your registration is pending approval by {approver}. Please wait for approval before logging in."
+                    "Your registration is pending approval by the Group Admin. Please wait for approval before logging in."
                 )
         elif not user.is_active:
             raise ForbiddenException(
-                f"Your registration is pending approval by {approver}. Please wait for approval before logging in."
+                "Your registration is pending approval by the Group Admin. Please wait for approval before logging in."
             )
 
     async def _login_existing_firebase_user(

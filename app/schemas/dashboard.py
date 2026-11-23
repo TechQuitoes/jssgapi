@@ -10,3 +10,4 @@ class DashboardStatisticsOut(BaseModel):
     total_groups: int
     total_post_holders: int
     total_cities: int
+    total_guests: int = 0
