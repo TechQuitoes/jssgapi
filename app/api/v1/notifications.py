@@ -10,7 +10,7 @@ from app.core.exceptions import NotFoundException
 from app.core.permissions import Permission
 from app.core.responses import created, ok, paginated
 from app.dependencies import CurrentUser, DBSession, OptionalUser, require_permission
-from app.models.notification import DeviceToken, Notification
+from app.models.notification import Notification
 from app.repositories.notification_repository import (
     DeviceTokenRepository,
     NotificationRepository,
@@ -81,19 +81,48 @@ async def remove_device(token_id: UUID, current_user: CurrentUser, db: DBSession
 async def list_notifications(
     db: DBSession,
     current_user: OptionalUser = None,
-    category: str | None = Query(default=None, description="Filter by category: contribution, group_payment, ad_payment, payment, or all"),
+    category: str | None = Query(
+        default=None,
+        description="Filter by category: contribution, group_payment, ad_payment, payment, or all",
+    ),
     unread_only: bool = Query(default=False),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
+    if current_user is None:
+        return paginated(
+            "Notifications fetched successfully",
+            [],
+            {
+                "page": page,
+                "page_size": page_size,
+                "total": 0,
+                "total_pages": 0,
+            },
+        )
+
+    from app.services.notification_service import get_group_admin_group_ids
+
     repo = NotificationRepository(db)
-    user_id = current_user.id if current_user else None
-    if unread_only and user_id is not None:
+    user_id = current_user.id
+    group_ids = await get_group_admin_group_ids(db, current_user)
+
+    if unread_only:
         items = await repo.list_for_user(
-            user_id, limit=page_size, offset=(page - 1) * page_size, category=category
+            user_id,
+            limit=page_size,
+            offset=(page - 1) * page_size,
+            category=category,
+            current_user=current_user,
+            group_ids=group_ids,
         )
         items = [n for n in items if not n.is_read]
-        unseen = await repo.count_unread(user_id, category=category)
+        unseen = await repo.count_unread(
+            user_id,
+            category=category,
+            current_user=current_user,
+            group_ids=group_ids,
+        )
         return ok(
             "Unread notifications fetched successfully",
             {
@@ -101,10 +130,21 @@ async def list_notifications(
                 "items": [NotificationOut.model_validate(n) for n in items],
             },
         )
+
     items = await repo.list_for_user(
-        user_id, limit=page_size, offset=(page - 1) * page_size, category=category
+        user_id,
+        limit=page_size,
+        offset=(page - 1) * page_size,
+        category=category,
+        current_user=current_user,
+        group_ids=group_ids,
     )
-    total = await repo.count_for_user(user_id, category=category)
+    total = await repo.count_for_user(
+        user_id,
+        category=category,
+        current_user=current_user,
+        group_ids=group_ids,
+    )
     total_pages = (total + page_size - 1) // page_size if total > 0 else 0
     return paginated(
         "Notifications fetched successfully",
@@ -231,13 +271,17 @@ async def broadcast_notification(
 async def get_notification(
     notification_id: UUID, current_user: CurrentUser, db: DBSession
 ):
+    from app.services.notification_service import get_group_admin_group_ids
+
     repo = NotificationRepository(db)
     notification = await repo.get_by_id(notification_id)
-    if (
-        notification is None
-        or (notification.recipient_id is not None and notification.recipient_id != current_user.id)
-    ):
+    if notification is None:
         raise NotFoundException("Notification", str(notification_id))
+
+    group_ids = await get_group_admin_group_ids(db, current_user)
+    if not repo.can_user_access(notification, current_user, group_ids=group_ids):
+        raise NotFoundException("Notification", str(notification_id))
+
     return ok(
         "Notification fetched successfully",
         NotificationOut.model_validate(notification),
@@ -248,13 +292,17 @@ async def get_notification(
 async def mark_notification_read(
     notification_id: UUID, current_user: CurrentUser, db: DBSession
 ):
+    from app.services.notification_service import get_group_admin_group_ids
+
     repo = NotificationRepository(db)
     notification = await repo.get_by_id(notification_id)
-    if (
-        notification is None
-        or (notification.recipient_id is not None and notification.recipient_id != current_user.id)
-    ):
+    if notification is None:
         raise NotFoundException("Notification", str(notification_id))
+
+    group_ids = await get_group_admin_group_ids(db, current_user)
+    if not repo.can_user_access(notification, current_user, group_ids=group_ids):
+        raise NotFoundException("Notification", str(notification_id))
+
     if not notification.is_read:
         notification.is_read = True
         notification.read_at = _now()
@@ -267,14 +315,17 @@ async def mark_notification_read(
 
 @router.post("/read-all")
 async def mark_all_read(current_user: CurrentUser, db: DBSession):
-    from sqlalchemy import or_
+    from app.services.notification_service import get_group_admin_group_ids
 
+    repo = NotificationRepository(db)
+    group_ids = await get_group_admin_group_ids(db, current_user)
+    filters = repo._apply_filters(
+        current_user=current_user,
+        group_ids=group_ids,
+    )
     result = await db.execute(
         select(Notification).where(
-            or_(
-                Notification.recipient_id == current_user.id,
-                Notification.recipient_id.is_(None),
-            ),
+            *filters,
             Notification.is_read.is_(False),
         )
     )

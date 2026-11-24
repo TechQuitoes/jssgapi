@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.notification import DeviceToken, Notification
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,9 @@ async def get_active_device_tokens(session: AsyncSession, user_id: UUID) -> list
         )
         return [t for t in result.scalars().all() if t]
     except Exception as exc:
-        logger.warning("Failed to query active device tokens for user %s: %s", user_id, exc)
+        logger.warning(
+            "Failed to query active device tokens for user %s: %s", user_id, exc
+        )
         return []
 
 
@@ -46,6 +50,7 @@ async def get_admin_user_ids(
 ) -> list[UUID]:
     """Fetch user IDs for all SUPER_ADMINs, plus GROUP_ADMINs of the given group."""
     try:
+        from app.models.member import Member
         from app.models.member_group import GroupMember
         from app.models.user import Role, User
 
@@ -103,10 +108,73 @@ async def get_admin_user_ids(
                 if uid:
                     admin_ids.add(uid)
 
+            # Check Member table fallback for group admin
+            stmt_m = (
+                select(Member.user_id)
+                .join(User, Member.user_id == User.id)
+                .join(Role, User.role_id == Role.id)
+                .where(
+                    Member.group_id == group_id,
+                    func.upper(func.trim(Role.name)).in_(
+                        ["GROUP_ADMIN", "REGIONAL_ADMIN"]
+                    ),
+                    User.is_active.is_(True),
+                    User.deleted_at.is_(None),
+                )
+            )
+            res_m = await session.execute(stmt_m)
+            for uid in res_m.scalars().all():
+                if uid:
+                    admin_ids.add(uid)
+
         return list(admin_ids)
     except Exception as exc:
         logger.error("Failed to query admin user IDs for group %s: %s", group_id, exc)
         return []
+
+
+async def get_group_admin_group_ids(session: AsyncSession, user: User) -> list[UUID]:
+    """Fetch all group IDs administered by the user (from user.group_id, GroupMember, and Member fallback)."""
+    group_ids: set[UUID] = set()
+    if user.group_id:
+        group_ids.add(user.group_id)
+
+    try:
+        from app.models.member_group import GroupMember
+
+        stmt_gm = select(GroupMember.group_id).where(
+            GroupMember.user_id == user.id,
+            func.upper(func.trim(GroupMember.role)) == "GROUP_ADMIN",
+        )
+        res_gm = await session.execute(stmt_gm)
+        for gid in res_gm.scalars().all():
+            if gid:
+                group_ids.add(gid)
+    except Exception as exc:
+        logger.debug("Could not query GroupMember for user %s: %s", user.id, exc)
+
+    if not group_ids:
+        try:
+            from app.models.member import Member
+
+            stmt_m = select(Member.group_id).where(Member.user_id == user.id)
+            res_m = await session.execute(stmt_m)
+            gid = res_m.scalar_one_or_none()
+            if gid:
+                group_ids.add(gid)
+            elif user.phone_number:
+                stmt_phone = select(Member.group_id).where(
+                    Member.contact_phone == user.phone_number,
+                    Member.is_deleted.is_(False),
+                )
+                res_phone = await session.execute(stmt_phone)
+                gid_phone = res_phone.scalars().first()
+                if gid_phone:
+                    group_ids.add(gid_phone)
+        except Exception as exc:
+            logger.debug("Could not query Member for user %s: %s", user.id, exc)
+
+    return list(group_ids)
 
 
 async def send_push_notification_to_user(
@@ -146,7 +214,9 @@ async def send_push_notification_to_user(
                 if ok:
                     success_count += 1
             except Exception as e:
-                logger.warning("Failed to send push to token %s...: %s", dt.token[:15], e)
+                logger.warning(
+                    "Failed to send push to token %s...: %s", dt.token[:15], e
+                )
 
         logger.info(
             "FCM Push delivered to %d/%d devices for user %s",
@@ -178,7 +248,9 @@ async def send_push_notification_to_users(
             DeviceToken.is_active.is_(True),
         )
         res = await session.execute(stmt)
-        tokens = list(dict.fromkeys([t for t in res.scalars().all() if t and t.strip()]))
+        tokens = list(
+            dict.fromkeys([t for t in res.scalars().all() if t and t.strip()])
+        )
         if not tokens:
             logger.info("No active device tokens found for %d users", len(user_ids))
             return 0
@@ -214,7 +286,9 @@ async def broadcast_push_notification(
             stmt = stmt.where(DeviceToken.user_id.in_(user_ids))
 
         res = await session.execute(stmt)
-        tokens = list(dict.fromkeys([t for t in res.scalars().all() if t and t.strip()]))
+        tokens = list(
+            dict.fromkeys([t for t in res.scalars().all() if t and t.strip()])
+        )
         if not tokens:
             logger.info("No active device tokens found for broadcast")
             return 0
@@ -249,7 +323,7 @@ async def create_payment_notification(
     link: str | None = None,
 ) -> Notification | None:
     """Create a payment or contribution notification in the database and trigger FCM pushes:
-    
+
     a) Payer / Member: Receives a personalized confirmation ("आपका ₹X का सहयोग सफलतापूर्वक प्राप्त हुआ, धन्यवाद!")
     b) Group Admins & Super Admins: Receive an admin alert ("₹X का नया सहयोग प्राप्त हुआ - {donor_name}")
     """
@@ -257,6 +331,33 @@ async def create_payment_notification(
         amt_float = float(amount)
         amt_disp = int(amt_float) if amt_float.is_integer() else f"{amt_float:.2f}"
         amt_inr = f"₹{amt_disp}"
+
+        # Resolve missing group_id or group_name from Member/SocialGroup if available
+        if not group_id and recipient_id:
+            try:
+                from app.models.member import Member
+
+                stmt_m = select(Member.group_id).where(Member.user_id == recipient_id)
+                res_m = await session.execute(stmt_m)
+                resolved_gid = res_m.scalar_one_or_none()
+                if isinstance(resolved_gid, UUID):
+                    group_id = resolved_gid
+                elif isinstance(resolved_gid, str):
+                    group_id = UUID(resolved_gid)
+            except Exception:
+                pass
+
+        if group_id and not group_name:
+            try:
+                from app.models.group import SocialGroup
+
+                stmt_g = select(SocialGroup.name).where(SocialGroup.id == group_id)
+                res_g = await session.execute(stmt_g)
+                resolved_gname = res_g.scalar_one_or_none()
+                if isinstance(resolved_gname, str):
+                    group_name = resolved_gname
+            except Exception:
+                pass
 
         # 1. Determine titles and bodies for both Member and Admins
         if category == "contribution":
@@ -282,7 +383,9 @@ async def create_payment_notification(
             default_link = "/admin/payments"
         elif category == "ad_payment":
             member_push_title = "विज्ञापन भुगतान प्राप्त हुआ"
-            member_push_body = f"आपका {amt_inr} का विज्ञापन भुगतान सफलतापूर्वक प्राप्त हुआ, धन्यवाद!"
+            member_push_body = (
+                f"आपका {amt_inr} का विज्ञापन भुगतान सफलतापूर्वक प्राप्त हुआ, धन्यवाद!"
+            )
 
             ad_target = donor_name or purpose or "विज्ञापन"
             admin_push_title = "नया विज्ञापन भुगतान प्राप्त हुआ"
@@ -354,7 +457,9 @@ async def create_payment_notification(
                     "receipt_no": receipt_no or "",
                     "order_id": order_id or "",
                     "notification_type": notification_type,
-                    "notification_id": str(member_notif.id if member_notif else admin_notif.id),
+                    "notification_id": str(
+                        member_notif.id if member_notif else admin_notif.id
+                    ),
                     "target": "member",
                 }
                 await send_push_notification_to_user(
@@ -366,7 +471,13 @@ async def create_payment_notification(
                 )
 
             # b) Send Admin Push Notification (to GROUP_ADMIN of that group + all SUPER_ADMINs)
-            admin_user_ids = await get_admin_user_ids(session, group_id=group_id)
+            if category == "ad_payment":
+                # Advertisements are platform-level: only Super Admins receive notification
+                admin_user_ids = await get_admin_user_ids(session, group_id=None)
+            else:
+                # Group payment / contribution: Super Admins + Group Admin of that group
+                admin_user_ids = await get_admin_user_ids(session, group_id=group_id)
+
             target_admin_ids = [uid for uid in admin_user_ids if uid != recipient_id]
 
             if target_admin_ids:
@@ -389,7 +500,9 @@ async def create_payment_notification(
                     data=admin_payload,
                 )
         except Exception as push_err:
-            logger.warning("FCM push alerts trigger failed (DB notification saved): %s", push_err)
+            logger.warning(
+                "FCM push alerts trigger failed (DB notification saved): %s", push_err
+            )
 
         return member_notif or admin_notif
     except Exception as exc:
