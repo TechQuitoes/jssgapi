@@ -141,6 +141,7 @@ class SocialGroupOut(BaseModel):
     contact_phone: str | None = None
     address: str | None = None
     logo_url: str | None = None
+    payment_qr_url: str | None = None
     status: str
     is_active: bool
     location_id: UUID | None = None

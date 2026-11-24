@@ -52,6 +52,10 @@ class AdvertisementService:
             )
         return plan
 
+    async def resolve_plan(self, months: int) -> AdvertisementSubscriptionPlan:
+        """Alias for :meth:`get_subscription_plan` used by the renewal endpoint."""
+        return await self.get_subscription_plan(months)
+
     async def update_subscription_prices(
         self, updates: list[tuple[int, Decimal]]
     ) -> list[AdvertisementSubscriptionPlan]:

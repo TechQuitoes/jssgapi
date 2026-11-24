@@ -63,6 +63,10 @@ class SocialGroup(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     contact_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payment_qr_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payment_qr_object_key: Mapped[str | None] = mapped_column(
+        String(500), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     location_id: Mapped[uuid.UUID | None] = mapped_column(

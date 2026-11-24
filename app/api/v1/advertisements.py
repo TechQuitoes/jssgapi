@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import json
+import logging
 import uuid
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -32,6 +33,8 @@ from app.schemas.advertisement import (
 )
 from app.services.advertisement_service import AdvertisementService
 from app.services.audit_service import AuditService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/advertisements", tags=["Advertisements"])
 
@@ -800,7 +803,7 @@ async def verify_ad_payment(
         await create_payment_notification(
             db,
             category="ad_payment",
-            amount=Decimal(str(ad.total_amount or 0)),
+            amount=Decimal(str(ad.amount or 0)),
             group_id=getattr(ad, "group_id", None),
             purpose=ad.title,
             receipt_no=body.razorpay_payment_id,
@@ -929,12 +932,12 @@ async def record_ad_manual_payment(
         await create_payment_notification(
             db,
             category="ad_payment",
-            amount=Decimal(str(ad.total_amount or 0)),
+            amount=Decimal(str(ad.amount or 0)),
             group_id=getattr(ad, "group_id", None),
             purpose=ad.title,
-            receipt_no=body.razorpay_payment_id,
-            transaction_id=body.razorpay_payment_id,
-            order_id=body.razorpay_order_id,
+            receipt_no=txn_ref,
+            transaction_id=txn_ref,
+            order_id=str(payment.id),
             recipient_id=current_user.id if current_user else None,
             payment_id=ad.id,
             link="/admin/advertisements",

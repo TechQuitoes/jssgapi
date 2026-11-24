@@ -5,7 +5,7 @@ import secrets
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -902,3 +902,138 @@ async def delete_group(
     await invalidate_group_cache()
     await invalidate_member_cache()
     return ok("Group deleted successfully")
+
+
+# ── Payment QR Code Image ──────────────────────────────────────────────
+
+
+@router.post("/{group_id}/payment-qr", dependencies=[UPDATE])
+async def upload_payment_qr(
+    group_id: UUID,
+    request: Request,
+    current_user: CurrentUser,
+    db: DBSession,
+    file: UploadFile = File(...),
+):
+    """Upload or replace the group's payment QR code image (Max: 5MB).
+
+    The image is stored via the platform's media service and the resulting
+    public URL is persisted on the group as ``payment_qr_url``.  Flutter
+    shows this image so any member can scan the QR to pay.
+    """
+    import uuid as _uuid
+
+    from app.core.constants import AuditAction as _AuditAction
+    from app.services.media_service import MediaService
+    from app.repositories.media_repository import MediaRepository
+    from app.utils.file_upload import MIME_SUFFIX, validate_image_upload
+
+    MAX_QR_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+    repo = GroupRepository(db)
+    group = await repo.get_by_id(group_id)
+    if group is None:
+        raise NotFoundException("Group", str(group_id))
+    await assert_group_access(db, current_user, group.id)
+
+    content = await file.read()
+    if len(content) > MAX_QR_IMAGE_SIZE:
+        raise BadRequestException("QR image is larger than 5 MB limit")
+
+    safe_name, safe_mime = validate_image_upload(
+        file.filename, file.content_type, content, error_code="INVALID_QR_IMAGE"
+    )
+    object_key = f"groups/{group_id}/payment-qr/{_uuid.uuid4().hex}{MIME_SUFFIX[safe_mime]}"
+    previous_key = (group.payment_qr_object_key or "").strip() or None
+
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    base_url = str(request.base_url)
+
+    service = MediaService(db)
+    media = await service.upload(
+        owner_type="group",
+        owner_id=group.id,
+        file_name=safe_name,
+        content=content,
+        mime_type=safe_mime,
+        is_public=True,
+        group_id=group.id,
+        uploaded_by=current_user.id,
+        ip_address=ip,
+        user_agent=ua,
+        base_url=base_url,
+        object_key=object_key,
+    )
+
+    group.payment_qr_url = media.url
+    group.payment_qr_object_key = object_key
+
+    # Clean up old QR image if one existed
+    if previous_key:
+        try:
+            service.storage.delete_object(previous_key)
+        except Exception:
+            pass
+        old_media = await MediaRepository(db).get_by_object_key(previous_key)
+        if old_media is not None:
+            await MediaRepository(db).delete(old_media)
+
+    await AuditService(db).log(
+        _AuditAction.GROUP_UPDATE,
+        user_id=current_user.id,
+        entity_type="group",
+        entity_id=group.id,
+        details={"action": "payment_qr_upload", "url": media.url},
+    )
+    await db.flush()
+    await db.refresh(group)
+    await invalidate_group_cache()
+    return ok("Payment QR image uploaded successfully", SocialGroupOut.model_validate(group))
+
+
+@router.delete("/{group_id}/payment-qr", dependencies=[UPDATE])
+async def delete_payment_qr(
+    group_id: UUID,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Remove the group's payment QR code image."""
+    import logging as _logging
+
+    from app.core.constants import AuditAction as _AuditAction
+    from app.repositories.media_repository import MediaRepository
+    from app.services.media_storage import get_storage
+
+    _logger = _logging.getLogger(__name__)
+
+    repo = GroupRepository(db)
+    group = await repo.get_by_id(group_id)
+    if group is None:
+        raise NotFoundException("Group", str(group_id))
+    await assert_group_access(db, current_user, group.id)
+
+    key = (group.payment_qr_object_key or "").strip() or None
+    group.payment_qr_url = None
+    group.payment_qr_object_key = None
+
+    if key:
+        try:
+            get_storage().delete_object(key)
+        except Exception:
+            _logger.warning("Could not delete QR media object %s", key, exc_info=True)
+        old_media = await MediaRepository(db).get_by_object_key(key)
+        if old_media is not None:
+            await MediaRepository(db).delete(old_media)
+
+    await AuditService(db).log(
+        _AuditAction.GROUP_UPDATE,
+        user_id=current_user.id,
+        entity_type="group",
+        entity_id=group.id,
+        details={"action": "payment_qr_delete"},
+    )
+    await db.flush()
+    await db.refresh(group)
+    await invalidate_group_cache()
+    return ok("Payment QR image deleted successfully", SocialGroupOut.model_validate(group))
