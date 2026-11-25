@@ -43,13 +43,16 @@ logging.getLogger(__name__).warning(
     _looks_unreachable,
 )
 
+_connect_args: dict[str, Any] = {
+    "statement_cache_size": 0,
+}
+if not _looks_unreachable:
+    _connect_args["ssl"] = "require"
+
 engine = create_async_engine(
     settings.database_url,
     echo=settings.database_echo,
-    connect_args={
-        "ssl": "require",
-        "statement_cache_size": 0,
-    },
+    connect_args=_connect_args,
     pool_size=5,
     max_overflow=5,
     pool_recycle=300,
