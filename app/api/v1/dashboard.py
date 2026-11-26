@@ -70,7 +70,10 @@ async def get_dashboard_statistics(
         .where(
             Member.is_deleted.is_(False),
             Member.membership_status == MemberStatus.APPROVED.value,
-            trustee_role_filter(),
+            or_(
+                Member.is_post_holder.is_(True),
+                trustee_role_filter(),
+            ),
         )
         .scalar_subquery()
     )

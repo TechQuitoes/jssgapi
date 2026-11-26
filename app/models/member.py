@@ -109,6 +109,12 @@ class Member(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     is_profile_complete: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
+    is_post_holder: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False, index=True
+    )
+    post_holder_title: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
 
     user: Mapped[User | None] = relationship(back_populates="member", lazy="selectin")
     group: Mapped[SocialGroup | None] = relationship(back_populates="members")

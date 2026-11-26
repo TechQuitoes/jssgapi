@@ -149,6 +149,7 @@ class SocialGroupOut(BaseModel):
     # no Group Admin yet, which is a valid state a SUPER_ADMIN must be able to see.
     admins: list[GroupAdminOut] = []
     member_count: int = 0
+    post_holder_count: int = 0
     created_at: datetime
     updated_at: datetime
 

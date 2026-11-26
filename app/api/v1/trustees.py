@@ -107,7 +107,12 @@ async def _trustee_listing(
             if is_current
             else Member.membership_status != current
         )
-    stmt = stmt.where(trustee_role_filter(resolved_role))
+    stmt = stmt.where(
+        or_(
+            Member.is_post_holder.is_(True),
+            trustee_role_filter(resolved_role),
+        )
+    )
     if (designation or "").strip():
         stmt = stmt.where(designation_filter(designation.strip()))
     if query:
@@ -309,7 +314,7 @@ def _member_trustee_out(member: Member, profiles: ProfileService) -> MemberTrust
     if group is not None and group.is_deleted:
         group = None
     role = _member_trustee_role(member)
-    designation = (profile.group_designation or "").strip()
+    designation = member.post_holder_title or (profile.group_designation or "").strip()
     return MemberTrusteeOut(
         id=member.id,
         member_id=member.id,
@@ -319,8 +324,10 @@ def _member_trustee_out(member: Member, profiles: ProfileService) -> MemberTrust
         last_name=member.last_name,
         full_name=profile.full_name or "",
         role=role,
+        is_post_holder=member.is_post_holder,
+        post_holder_title=member.post_holder_title,
         # The tag is the role when the member has no board designation to show.
-        designation=designation or (role or ""),
+        designation=member.post_holder_title or designation or (role or ""),
         contact_email=member.contact_email,
         contact_phone=member.contact_phone,
         profile_photo_url=member.profile_photo_url,

@@ -325,16 +325,19 @@ class GroupRepository(BaseRepository[SocialGroup]):
         """Calculate member counts for a list of group IDs in a single aggregated query.
 
         Unifies the legacy Member.group_id pointer and MemberGroupMembership
-        many-to-many associations, counting only unique non-deleted members.
+        many-to-many associations, counting only unique approved, non-deleted members.
         """
         if not group_ids:
             return {}
+
+        from app.core.constants import MemberStatus
 
         legacy_links = select(
             Member.group_id.label("group_id"),
             Member.id.label("member_id"),
         ).where(
             Member.is_deleted.is_(False),
+            Member.membership_status == MemberStatus.APPROVED.value,
             Member.group_id.in_(group_ids),
         )
 
@@ -347,6 +350,7 @@ class GroupRepository(BaseRepository[SocialGroup]):
             .join(Member, Member.id == MemberGroupMembership.member_id)
             .where(
                 Member.is_deleted.is_(False),
+                Member.membership_status == MemberStatus.APPROVED.value,
                 MemberGroupMembership.group_id.in_(group_ids),
             )
         )
@@ -355,7 +359,61 @@ class GroupRepository(BaseRepository[SocialGroup]):
         stmt = (
             select(
                 unioned.c.group_id,
-                func.count(unioned.c.member_id).label("member_count"),
+                func.count(func.distinct(unioned.c.member_id)).label("member_count"),
+            )
+            .group_by(unioned.c.group_id)
+        )
+        result = await self.session.execute(stmt)
+        return {row[0]: int(row[1]) for row in result.all()}
+
+    async def get_post_holder_counts(
+        self, group_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, int]:
+        """Calculate post holder counts for a list of group IDs in a single aggregated query.
+
+        Counts only distinct approved, non-deleted members marked as post holders (or qualifying as trustees).
+        """
+        if not group_ids:
+            return {}
+
+        from app.core.constants import MemberStatus
+        from app.repositories.member_repository import trustee_role_filter
+
+        post_holder_filter = or_(
+            Member.is_post_holder.is_(True),
+            trustee_role_filter(),
+        )
+
+        legacy_links = select(
+            Member.group_id.label("group_id"),
+            Member.id.label("member_id"),
+        ).where(
+            Member.is_deleted.is_(False),
+            Member.membership_status == MemberStatus.APPROVED.value,
+            Member.group_id.in_(group_ids),
+            post_holder_filter,
+        )
+
+        membership_links = (
+            select(
+                MemberGroupMembership.group_id.label("group_id"),
+                MemberGroupMembership.member_id.label("member_id"),
+            )
+            .select_from(MemberGroupMembership)
+            .join(Member, Member.id == MemberGroupMembership.member_id)
+            .where(
+                Member.is_deleted.is_(False),
+                Member.membership_status == MemberStatus.APPROVED.value,
+                MemberGroupMembership.group_id.in_(group_ids),
+                post_holder_filter,
+            )
+        )
+
+        unioned = legacy_links.union(membership_links).subquery("unioned_post_holder_links")
+        stmt = (
+            select(
+                unioned.c.group_id,
+                func.count(func.distinct(unioned.c.member_id)).label("post_holder_count"),
             )
             .group_by(unioned.c.group_id)
         )

@@ -111,6 +111,8 @@ def _member_list_item(member: Member, profiles: ProfileService) -> MemberListIte
         merged["member_dob"] = merged["date_of_birth"]
     merged["member_id"] = member.id
     merged["status"] = member.membership_status
+    merged["is_post_holder"] = member.is_post_holder
+    merged["post_holder_title"] = member.post_holder_title
     if not merged.get("phone_number"):
         merged["phone_number"] = member.contact_phone
     if not merged.get("email"):

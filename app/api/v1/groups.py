@@ -209,14 +209,17 @@ async def _assign_default_group_admin(
 async def _serialize_groups_with_counts(
     repo: GroupRepository, groups: list[SocialGroup]
 ) -> list[dict[str, Any]]:
-    """Serialize groups to JSON-compatible dicts with member counts aggregated in a single query."""
+    """Serialize groups to JSON-compatible dicts with member and post holder counts aggregated in single queries."""
     if not groups:
         return []
-    counts_map = await repo.get_member_counts([g.id for g in groups])
+    group_ids = [g.id for g in groups]
+    counts_map = await repo.get_member_counts(group_ids)
+    post_holders_map = await repo.get_post_holder_counts(group_ids)
     serialized: list[dict[str, Any]] = []
     for g in groups:
         out = SocialGroupOut.model_validate(g)
         out.member_count = counts_map.get(g.id, 0)
+        out.post_holder_count = post_holders_map.get(g.id, 0)
         serialized.append(out.model_dump(mode="json"))
     return serialized
 
@@ -427,8 +430,10 @@ async def get_group(group_id: UUID, db: DBSession, current_user: CurrentUser):
     if not scope.unrestricted and scope.group_id != group_id:
         raise NotFoundException("Group", str(group_id))
     counts = await repo.get_member_counts([group.id])
+    post_holders = await repo.get_post_holder_counts([group.id])
     out = SocialGroupOut.model_validate(group)
     out.member_count = counts.get(group.id, 0)
+    out.post_holder_count = post_holders.get(group.id, 0)
     return ok("Group fetched successfully", out)
 
 

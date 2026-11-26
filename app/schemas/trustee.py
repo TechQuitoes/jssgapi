@@ -87,6 +87,8 @@ class MemberTrusteeOut(BaseModel):
     #: member qualifies only through a post-holder designation.
     role: str | None = None
     designation: str
+    is_post_holder: bool = True
+    post_holder_title: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None
     profile_photo_url: str | None = None

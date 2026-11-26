@@ -247,6 +247,8 @@ class MemberOut(BaseModel):
     approved_at: datetime | None = None
     rejection_reason: str | None = None
     is_profile_complete: bool
+    is_post_holder: bool = False
+    post_holder_title: str | None = None
     user: UserOut | None = None
     family_members: list[FamilyMemberOut] = []
     professional_info: list[ProfessionalInfoOut] = []
