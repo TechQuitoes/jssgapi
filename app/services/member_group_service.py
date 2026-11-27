@@ -279,4 +279,11 @@ async def detach_member(db: AsyncSession, member: Member) -> None:
             delete(GroupMember).where(GroupMember.user_id == member.user_id)
         )
     member.group_id = None
+    member.membership_number = None
+    member.is_post_holder = False
+    member.post_holder_title = None
+    if member.profile_data:
+        prof = dict(member.profile_data)
+        prof.pop("social_group_name", None)
+        member.profile_data = prof
 

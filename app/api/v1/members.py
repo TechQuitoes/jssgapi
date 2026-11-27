@@ -14,7 +14,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.permissions import Permission
-from app.core.redis import invalidate_member_cache, redis_client
+from app.core.redis import invalidate_group_cache, invalidate_member_cache, redis_client
 from app.core.responses import created, ok, paginated
 from app.core.security import hash_password
 from app.core.scope import (
@@ -952,6 +952,7 @@ async def approve_member(
     else:
         raise BadRequestException("Use update endpoint for status changes")
     await invalidate_member_cache()
+    await invalidate_group_cache()
     member = await _reload_member(db, member.id)
     return ok("Member status updated successfully", _member_out(member))
 
@@ -971,6 +972,8 @@ async def delete_member(member_id: UUID, current_user: CurrentUser, db: DBSessio
         user = await UserRepository(db).get_by_id(member.user_id)
         if user:
             user.group_id = None
+            user.is_active = False
+            user.soft_delete()
             res = await db.execute(select(Role).where(Role.name == RoleName.MEMBER.value))
             member_role = res.scalar_one_or_none()
             if member_role and user.role_id != member_role.id:
@@ -981,4 +984,5 @@ async def delete_member(member_id: UUID, current_user: CurrentUser, db: DBSessio
     await MemberPhotoService(db).remove_all(member)
     await db.flush()
     await invalidate_member_cache()
+    await invalidate_group_cache()
     return ok("Member deleted successfully")
