@@ -172,6 +172,8 @@ async def remove_membership(
     if new_primary is None:
         member.group_id = None
         member.membership_number = None
+        member.is_post_holder = False
+        member.post_holder_title = None
         if member.profile_data:
             prof = dict(member.profile_data)
             prof.pop("social_group_name", None)

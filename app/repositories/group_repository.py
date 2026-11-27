@@ -323,6 +323,20 @@ class GroupRepository(BaseRepository[SocialGroup]):
             ),
             {"gname": group.name.strip()},
         )
+        from app.core.constants import RoleName
+        from app.models.user import Role, User
+
+        member_role_id = (
+            await self.session.execute(
+                select(Role.id).where(Role.name == RoleName.MEMBER.value)
+            )
+        ).scalar_one_or_none()
+        if member_role_id:
+            await self.session.execute(
+                update(User)
+                .where(User.group_id == group.id)
+                .values(role_id=member_role_id, group_id=None)
+            )
         await self.session.delete(group)
         await self.session.flush()
 
