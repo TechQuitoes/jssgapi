@@ -139,7 +139,13 @@ class MemberPhotoService:
             object_key=object_key,
         )
 
-        self._write_slot(member, slot, media.url, object_key)
+        self._write_slot(
+            member,
+            slot,
+            media.url,
+            object_key,
+            thumb_url=media.thumb_url or media.url,
+        )
         await self.session.flush()
 
         # The new object is durable and referenced, so the old one can go. An
@@ -153,6 +159,8 @@ class MemberPhotoService:
         slot = self._slot(role)
         object_key = (getattr(member, slot.key_column) or "").strip() or None
         self._write_slot(member, slot, None, None)
+        if slot.role == "member":
+            member.profile_photo_thumb_url = None
         await self.session.flush()
         if object_key:
             await self._discard_object(object_key)
@@ -163,7 +171,12 @@ class MemberPhotoService:
             await self.remove(member, role=slot.role)
 
     def _write_slot(
-        self, member: Member, slot: PhotoSlot, url: str | None, object_key: str | None
+        self,
+        member: Member,
+        slot: PhotoSlot,
+        url: str | None,
+        object_key: str | None,
+        thumb_url: str | None = None,
     ) -> None:
         setattr(member, slot.key_column, object_key)
         # Only an absolute URL is a real public object URL; the relative media
@@ -174,8 +187,12 @@ class MemberPhotoService:
         setattr(member, slot.url_column, url if is_absolute else None)
         if slot.display_column:
             setattr(member, slot.display_column, url)
+            if slot.role == "member":
+                member.profile_photo_thumb_url = thumb_url or (url if url else None)
         profile_data = dict(member.profile_data or {})
         profile_data[slot.profile_key] = url
+        if slot.role == "member":
+            profile_data["member_photo_thumb_link"] = thumb_url or url
         member.profile_data = profile_data
 
     async def _discard_object(self, object_key: str) -> None:

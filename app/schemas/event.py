@@ -70,6 +70,7 @@ class EventCreate(BaseModel):
     venue_name: str | None = Field(default=None, max_length=255)
     venue_address: str | None = None
     cover_image_url: str | None = None
+    cover_image_thumb_url: str | None = None
     event_type: EventType = EventType.OTHER
     event_type_other: str | None = Field(default=None, max_length=255)
     host_name: str | None = Field(default=None, max_length=255)
@@ -139,6 +140,7 @@ class EventUpdate(BaseModel):
     venue_name: str | None = Field(default=None, max_length=255)
     venue_address: str | None = None
     cover_image_url: str | None = None
+    cover_image_thumb_url: str | None = None
     event_type: EventType | None = None
     event_type_other: str | None = Field(default=None, max_length=255)
     host_name: str | None = Field(default=None, max_length=255)
@@ -217,8 +219,15 @@ class EventImageOut(BaseModel):
     id: UUID
     event_id: UUID
     url: str
+    thumb_url: str | None = None
     position: int
     created_at: datetime
+
+    @model_validator(mode="after")
+    def _fill_thumb_url(self) -> EventImageOut:
+        if not self.thumb_url:
+            self.thumb_url = self.url
+        return self
 
 
 class EventOut(BaseModel):
@@ -243,6 +252,8 @@ class EventOut(BaseModel):
     venue_name: str | None = None
     venue_address: str | None = None
     cover_image_url: str | None = None
+    cover_image_thumb_url: str | None = None
+    thumb_url: str | None = None
     event_type: str
     event_type_other: str | None = None
     host_id: UUID | None = None
@@ -276,6 +287,8 @@ class EventOut(BaseModel):
 
     @model_validator(mode="after")
     def _compute_time_frame(self) -> EventOut:
+        if not self.thumb_url:
+            self.thumb_url = self.cover_image_thumb_url or self.cover_image_url
         if self.event_date and self.event_time:
             frame = classify_time_frame(
                 parse_event_date(self.event_date), parse_event_time(self.event_time)

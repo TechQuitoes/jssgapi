@@ -20,6 +20,7 @@ class MediaOut(BaseModel):
     mime_type: str
     file_size: int
     url: str
+    thumb_url: str | None = None
     width: int | None = None
     height: int | None = None
     is_public: bool

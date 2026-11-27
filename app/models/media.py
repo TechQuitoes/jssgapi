@@ -44,6 +44,10 @@ class Media(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     r2_object_key: Mapped[str] = mapped_column(String(500), unique=True, nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
+    thumb_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    thumb_object_key: Mapped[str | None] = mapped_column(
+        String(500), nullable=True
+    )
     width: Mapped[int | None] = mapped_column(nullable=True)
     height: Mapped[int | None] = mapped_column(nullable=True)
     is_public: Mapped[bool] = mapped_column(default=True, nullable=False)

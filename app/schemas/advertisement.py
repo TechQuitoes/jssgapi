@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SubscriptionDurationOption(BaseModel):
@@ -34,6 +34,7 @@ class AdvertisementCreate(BaseModel):
     end_date: datetime | date | None = None
     subscription_months: int = 1
     cover_image_url: str | None = None
+    cover_image_thumb_url: str | None = None
     large_image_url: str | None = None
     amount: Decimal | float | None = None
     payment_status: str | None = None
@@ -56,6 +57,7 @@ class AdvertisementUpdate(BaseModel):
     end_date: datetime | date | None = None
     subscription_months: int | None = None
     cover_image_url: str | None = None
+    cover_image_thumb_url: str | None = None
     large_image_url: str | None = None
     amount: Decimal | float | None = None
     payment_status: str | None = None
@@ -85,6 +87,8 @@ class AdvertisementOut(BaseModel):
     media_url: str | None = None
     media_type: str
     cover_image_url: str | None = None
+    cover_image_thumb_url: str | None = None
+    thumb_url: str | None = None
     large_image_url: str | None = None
     amount: Decimal | float | None = None
     subscription_months: int | None = 1
@@ -111,6 +115,12 @@ class AdvertisementOut(BaseModel):
     rejection_reason: str | None = None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def _fill_thumb_url(self) -> AdvertisementOut:
+        if not self.thumb_url:
+            self.thumb_url = self.cover_image_thumb_url or self.cover_image_url or self.media_url
+        return self
 
 
 class AdvertisementRenewRequest(BaseModel):

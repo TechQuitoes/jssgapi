@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +19,7 @@ from app.utils.file_upload import (
     validate_file_size,
     validate_mime_type,
 )
+from app.utils.image_optimizer import process_image_upload
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -26,7 +28,11 @@ settings = get_settings()
 MEDIA_CONTENT_PATH = "/api/v1/media/{media_id}/content"
 
 
-def build_media_url(media_id: uuid.UUID, base_url: str | None = None) -> str:
+def build_media_url(
+    media_id: uuid.UUID,
+    base_url: str | None = None,
+    variant: str | None = None,
+) -> str:
     """Absolute URL the API itself serves media from.
 
     ``base_url`` normally comes from the incoming request, so the URL stays
@@ -34,6 +40,8 @@ def build_media_url(media_id: uuid.UUID, base_url: str | None = None) -> str:
     finally to a relative path.
     """
     path = MEDIA_CONTENT_PATH.format(media_id=media_id)
+    if variant:
+        path = f"{path}?variant={variant}"
     base = (base_url or settings.public_base_url or "").rstrip("/")
     return f"{base}{path}" if base else path
 
@@ -88,11 +96,45 @@ class MediaService:
         # still validated by the storage backend, so a pinned key cannot escape
         # the bucket root.
         object_key = object_key or build_object_key(category, file_name, owner_id)
+
+        thumb_object_key: str | None = None
+        thumb_url: str | None = None
+        media_id = uuid.uuid4()
+
+        if category == "image":
+            processed = process_image_upload(content, mime_type)
+            content = processed.full.content
+            mime_type = processed.full.mime_type
+            if processed.full.width and processed.full.height:
+                width = processed.full.width
+                height = processed.full.height
+
+            if processed.thumb is not None:
+                p = Path(object_key)
+                thumb_object_key = f"{p.parent}/thumb_{p.stem}.webp"
+                thumb_storage_url = self.storage.upload_bytes(
+                    thumb_object_key,
+                    processed.thumb.content,
+                    processed.thumb.mime_type,
+                )
+                thumb_url = (
+                    thumb_storage_url
+                    if _is_absolute(thumb_storage_url)
+                    else build_media_url(media_id, base_url, variant="thumb")
+                )
+
         # Raises rather than silently dropping the bytes, so a failed upload can
         # never be reported as a success with an unusable URL.
         storage_url = self.storage.upload_bytes(object_key, content, mime_type)
 
+        media_url = (
+            storage_url
+            if _is_absolute(storage_url)
+            else build_media_url(media_id, base_url)
+        )
+
         media = await self.repo.create(
+            id=media_id,
             owner_type=owner_type,
             owner_id=owner_id,
             group_id=group_id,
@@ -101,19 +143,13 @@ class MediaService:
             mime_type=mime_type,
             file_size=len(content),
             r2_object_key=object_key,
-            url="",
+            thumb_object_key=thumb_object_key,
+            url=media_url,
+            thumb_url=thumb_url,
             width=width,
             height=height,
             is_public=is_public,
             uploaded_by=uploaded_by,
-        )
-
-        # Prefer a real CDN/public URL when the backend has one, otherwise
-        # point at the route that streams the bytes.
-        media.url = (
-            storage_url
-            if _is_absolute(storage_url)
-            else build_media_url(media.id, base_url)
         )
 
         await self.audit.log(
@@ -136,6 +172,17 @@ class MediaService:
     def read(self, media: Media) -> bytes:
         return self.storage.read_bytes(media.r2_object_key)
 
+    def read_thumb(self, media: Media) -> bytes | None:
+        if not media.thumb_object_key:
+            return None
+        try:
+            return self.storage.read_bytes(media.thumb_object_key)
+        except Exception:
+            logger.warning(
+                "Could not read thumbnail for media %s", media.id, exc_info=True
+            )
+            return None
+
     async def delete(
         self,
         media: Media,
@@ -145,6 +192,8 @@ class MediaService:
         user_agent: str | None = None,
     ) -> None:
         self.storage.delete_object(media.r2_object_key)
+        if media.thumb_object_key:
+            self.storage.delete_object(media.thumb_object_key)
         await self.repo.delete(media)
         await self.audit.log(
             AuditAction.MEDIA_DELETE,

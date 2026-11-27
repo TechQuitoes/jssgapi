@@ -44,6 +44,7 @@ class Event(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     venue_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     venue_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     cover_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cover_image_thumb_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The storage key of the cover object, so a replacement can delete the
     # object it replaces.
     cover_image_object_key: Mapped[str | None] = mapped_column(

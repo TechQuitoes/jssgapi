@@ -20,6 +20,8 @@ class ProfileUpdate(BaseModel):
         default=None,
         validation_alias=AliasChoices("member_photo_link", "member_photo_url"),
     )
+    member_photo_thumb_link: str | None = None
+    thumb_url: str | None = None
     spouse_name: str | None = None
     spouse_mobile: str | None = None
     spouse_dob: str | None = None
@@ -156,3 +158,4 @@ class ProfileResponse(BaseModel):
 class ProfilePhotoResponse(BaseModel):
     success: bool = True
     photo_link: str
+    thumb_url: str | None = None

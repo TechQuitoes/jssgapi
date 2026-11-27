@@ -584,4 +584,5 @@ class DrivePhotoMigration:
             member.profile_data = profile_data
             if field_.mirror_to_profile_photo_url:
                 member.profile_photo_url = r2_url
+                member.profile_photo_thumb_url = r2_url
         return r2_url

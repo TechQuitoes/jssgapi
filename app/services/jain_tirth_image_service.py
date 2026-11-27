@@ -107,6 +107,7 @@ class JainTirthImageService:
                 jain_tirth_id=tirth.id,
                 media_id=media.id,
                 url=media.url,
+                thumb_url=media.thumb_url or media.url,
                 position=position,
                 uploaded_by=uploaded_by,
             )

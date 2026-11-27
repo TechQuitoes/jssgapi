@@ -64,6 +64,7 @@ class JainTirthService:
         )
 
         tirth.cover_image_url = media.url
+        tirth.cover_image_thumb_url = media.thumb_url or media.url
         tirth.cover_image_object_key = object_key
         await self.session.flush()
 
@@ -74,6 +75,7 @@ class JainTirthService:
     async def remove_cover(self, tirth: JainTirth) -> None:
         object_key = (tirth.cover_image_object_key or "").strip() or None
         tirth.cover_image_url = None
+        tirth.cover_image_thumb_url = None
         tirth.cover_image_object_key = None
         await self.session.flush()
         if object_key:

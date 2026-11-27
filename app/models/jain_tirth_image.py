@@ -27,6 +27,7 @@ class JainTirthImage(
         unique=True,
     )
     url: Mapped[str] = mapped_column(Text, nullable=False)
+    thumb_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

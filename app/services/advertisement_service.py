@@ -129,6 +129,7 @@ class AdvertisementService:
 
         ad.cover_image_object_key = object_key
         ad.cover_image_url = media.url
+        ad.cover_image_thumb_url = media.thumb_url or media.url
         if not ad.media_url:
             ad.media_url = media.url
 
@@ -193,6 +194,7 @@ class AdvertisementService:
         """Remove advertisement cover image."""
         key = (ad.cover_image_object_key or "").strip() or None
         ad.cover_image_url = None
+        ad.cover_image_thumb_url = None
         ad.cover_image_object_key = None
         if key:
             await self._discard_object(key)

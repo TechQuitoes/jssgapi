@@ -36,6 +36,7 @@ class JainTirth(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     )
     website_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     cover_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cover_image_thumb_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     cover_image_object_key: Mapped[str | None] = mapped_column(
         String(500), nullable=True
     )

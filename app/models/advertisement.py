@@ -30,6 +30,7 @@ class Advertisement(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     media_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     media_type: Mapped[str] = mapped_column(String(20), default="IMAGE")
     cover_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cover_image_thumb_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     cover_image_object_key: Mapped[str | None] = mapped_column(
         String(500), nullable=True
     )

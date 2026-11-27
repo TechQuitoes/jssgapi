@@ -127,6 +127,7 @@ class EventService:
         )
 
         event.cover_image_url = media.url
+        event.cover_image_thumb_url = media.thumb_url or media.url
         event.cover_image_object_key = object_key
         await self.session.flush()
 
@@ -138,6 +139,7 @@ class EventService:
         """Drop the cover image: clear the reference, then delete the object."""
         object_key = (event.cover_image_object_key or "").strip() or None
         event.cover_image_url = None
+        event.cover_image_thumb_url = None
         event.cover_image_object_key = None
         await self.session.flush()
         if object_key:

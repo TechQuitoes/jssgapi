@@ -261,12 +261,17 @@ async def migrate_drive_photos(
 
 
 @router.get("/{media_id}/content", include_in_schema=True)
-async def get_media_content(media_id: UUID, db: DBSession, user: OptionalUser):
+async def get_media_content(
+    media_id: UUID,
+    db: DBSession,
+    user: OptionalUser,
+    variant: str | None = Query(default=None),
+):
     """Stream the stored bytes.
 
-    This is what makes ``media.url`` renderable: uploads without a public CDN
-    domain point here. Public media is served anonymously; private media
-    requires the uploader, the owning member, or an admin.
+    This is what makes ``media.url`` and ``media.thumb_url`` renderable:
+    uploads without a public CDN domain point here. Public media is served
+    anonymously; private media requires the uploader, the owning member, or an admin.
     """
     media = await MediaRepository(db).get_by_id(media_id)
     if media is None or media.is_deleted:
@@ -275,10 +280,24 @@ async def get_media_content(media_id: UUID, db: DBSession, user: OptionalUser):
     if not media.is_public and not await _can_access_private(db, media, user):
         raise ForbiddenException()
 
-    content = MediaService(db).read(media)
+    service = MediaService(db)
+    mime_type = media.mime_type
+    filename = media.file_name
+
+    if variant == "thumb":
+        thumb_bytes = service.read_thumb(media)
+        if thumb_bytes is not None:
+            content = thumb_bytes
+            mime_type = "image/webp"
+            filename = f"thumb_{media.file_name}.webp"
+        else:
+            content = service.read(media)
+    else:
+        content = service.read(media)
+
     return StreamingResponse(
         iter([content]),
-        media_type=media.mime_type,
+        media_type=mime_type,
         headers={
             "Content-Length": str(len(content)),
             "Cache-Control": (
@@ -288,9 +307,15 @@ async def get_media_content(media_id: UUID, db: DBSession, user: OptionalUser):
             ),
             # Never let a stored file be interpreted as active content.
             "X-Content-Type-Options": "nosniff",
-            "Content-Disposition": f'inline; filename="{media.file_name}"',
+            "Content-Disposition": f'inline; filename="{filename}"',
         },
     )
+
+
+@router.get("/{media_id}/thumb", include_in_schema=True)
+async def get_media_thumb(media_id: UUID, db: DBSession, user: OptionalUser):
+    """Convenience endpoint to stream the WebP thumbnail directly."""
+    return await get_media_content(media_id, db, user, variant="thumb")
 
 
 async def _can_access_private(db: DBSession, media: Media, user: User | None) -> bool:

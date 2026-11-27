@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_validator
 
 from app.core.constants import EventStatus
 
@@ -22,6 +22,7 @@ class JainTirthCreate(BaseModel):
     contact_person_phone_2: str | None = Field(default=None, min_length=1, max_length=20)
     website_url: str | None = Field(default=None, max_length=500)
     cover_image_url: str | None = None
+    cover_image_thumb_url: str | None = None
     status: EventStatus = EventStatus.PUBLISHED
     is_public: bool = True
     group_id: UUID | None = None
@@ -96,6 +97,7 @@ class JainTirthUpdate(BaseModel):
     contact_person_phone_2: str | None = Field(default=None, min_length=1, max_length=20)
     website_url: str | None = Field(default=None, max_length=500)
     cover_image_url: str | None = None
+    cover_image_thumb_url: str | None = None
     status: EventStatus | None = None
     is_public: bool | None = None
     group_id: UUID | None = None
@@ -176,8 +178,15 @@ class JainTirthImageOut(BaseModel):
     id: UUID
     jain_tirth_id: UUID
     url: str
+    thumb_url: str | None = None
     position: int
     created_at: datetime
+
+    @model_validator(mode="after")
+    def _fill_thumb_url(self) -> JainTirthImageOut:
+        if not self.thumb_url:
+            self.thumb_url = self.url
+        return self
 
 
 class JainTirthOut(BaseModel):
@@ -195,6 +204,20 @@ class JainTirthOut(BaseModel):
     contact_person_phone_2: str | None = None
     website_url: str | None = None
     cover_image_url: str | None = None
+    cover_image_thumb_url: str | None = None
+    thumb_url: str | None = None
+    status: str
+    is_public: bool
+    group_id: UUID | None = None
+    image_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def _fill_thumb_url(self) -> JainTirthOut:
+        if not self.thumb_url:
+            self.thumb_url = self.cover_image_thumb_url or self.cover_image_url
+        return self
     status: str
     is_public: bool
     group_id: UUID | None = None

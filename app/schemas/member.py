@@ -11,6 +11,7 @@ from pydantic import (
     ConfigDict,
     Field,
     field_validator,
+    model_validator,
 )
 
 from app.core.constants import MemberStatus
@@ -84,6 +85,7 @@ class MemberCreate(ProfileUpdate):
     date_of_birth: DateOfBirth = None
     blood_group: str | None = None
     profile_photo_url: str | None = None
+    profile_photo_thumb_url: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None
     address_line: str | None = None
@@ -156,6 +158,7 @@ class MemberUpdate(ProfileUpdate):
     date_of_birth: DateOfBirth = None
     blood_group: str | None = None
     profile_photo_url: str | None = None
+    profile_photo_thumb_url: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None
     address_line: str | None = None
@@ -233,6 +236,8 @@ class MemberOut(BaseModel):
     def _format_dob(cls, v: Any) -> str | None:
         return format_to_dd_mm_yyyy(v)
     profile_photo_url: str | None = None
+    profile_photo_thumb_url: str | None = None
+    thumb_url: str | None = None
     contact_email: str | None = None
     contact_phone: str | None = None
     address_line: str | None = None
@@ -254,6 +259,12 @@ class MemberOut(BaseModel):
     professional_info: list[ProfessionalInfoOut] = []
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def _fill_thumb_url(self) -> MemberOut:
+        if not self.thumb_url:
+            self.thumb_url = self.profile_photo_thumb_url or self.profile_photo_url
+        return self
 
 
 class MemberListItemOut(MemberOut, ProfileOut):

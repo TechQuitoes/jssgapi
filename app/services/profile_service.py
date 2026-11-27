@@ -378,8 +378,10 @@ class ProfileService:
             base_url=base_url,
         )
         member.profile_photo_url = media.url
+        member.profile_photo_thumb_url = media.thumb_url or media.url
         profile_data = dict(member.profile_data or {})
         profile_data["member_photo_link"] = media.url
+        profile_data["member_photo_thumb_link"] = media.thumb_url or media.url
         member.profile_data = profile_data
         await self.session.flush()
         return media.url
