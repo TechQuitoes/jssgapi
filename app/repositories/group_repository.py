@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import String, and_, case, cast, delete, func, or_, select, update
+from sqlalchemy import String, and_, case, cast, delete, func, or_, select, text, update
 
 from app.models.fee import Fee
 from app.models.group import SocialGroup
@@ -315,6 +315,13 @@ class GroupRepository(BaseRepository[SocialGroup]):
             update(GroupPaymentObligation)
             .where(GroupPaymentObligation.group_id == group.id)
             .values(group_id=None)
+        )
+        await self.session.execute(
+            text(
+                "UPDATE members SET profile_data = profile_data - 'social_group_name' "
+                "WHERE group_id IS NULL AND trim(profile_data->>'social_group_name') = :gname"
+            ),
+            {"gname": group.name.strip()},
         )
         await self.session.delete(group)
         await self.session.flush()

@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ForbiddenException
@@ -103,6 +103,15 @@ async def add_membership(
 
     if priority == 1:
         member.group_id = group.id
+        if member.profile_data is None:
+            member.profile_data = {}
+        prof = dict(member.profile_data)
+        prof["social_group_name"] = group.name
+        if group.city:
+            prof["city"] = group.city
+        if group.state:
+            prof["state"] = group.state
+        member.profile_data = prof
         await db.flush()
         if group.group_id:
             await assign_member_id(db, member, group)
@@ -163,15 +172,27 @@ async def remove_membership(
     if new_primary is None:
         member.group_id = None
         member.membership_number = None
+        if member.profile_data:
+            prof = dict(member.profile_data)
+            prof.pop("social_group_name", None)
+            member.profile_data = prof
         await db.flush()
         return True, None
 
     new_primary.priority = 1
     member.group_id = new_primary.group_id
     group = await db.get(SocialGroup, new_primary.group_id)
-    await db.flush()
-    if group is not None and group.group_id:
-        await assign_member_id(db, member, group)
+    if group is not None:
+        if member.profile_data is not None:
+            prof = dict(member.profile_data)
+            prof["social_group_name"] = group.name
+            member.profile_data = prof
+        await db.flush()
+        if group.group_id:
+            await assign_member_id(db, member, group)
+        else:
+            member.membership_number = None
+            await db.flush()
     else:
         member.membership_number = None
         await db.flush()
@@ -227,8 +248,17 @@ async def sync_memberships(
 async def detach_group(db: AsyncSession, group_id: UUID) -> None:
     """Promote affected members before a group is hard-deleted."""
     result = await db.execute(
-        select(MemberGroupMembership.member_id)
-        .where(MemberGroupMembership.group_id == group_id)
+        select(Member.id)
+        .where(
+            or_(
+                Member.group_id == group_id,
+                Member.id.in_(
+                    select(MemberGroupMembership.member_id).where(
+                        MemberGroupMembership.group_id == group_id
+                    )
+                ),
+            )
+        )
         .distinct()
     )
     for member_id in list(result.scalars().all()):

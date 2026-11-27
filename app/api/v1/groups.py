@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -134,6 +134,19 @@ async def _assign_default_group_admin(
     user = await _get_user_by_phone_forms(user_repo, normalized)
     is_new_user = user is None
     if user is None:
+        existing_member = await member_repo.get_by_phone(normalized)
+        if (
+            existing_member is not None
+            and existing_member.group_id is not None
+            and existing_member.group_id != group.id
+        ):
+            existing_grp = await db.get(SocialGroup, existing_member.group_id)
+            g_title = existing_grp.name if existing_grp else "another group"
+            raise BadRequestException(
+                f"Phone number '{admin_phone_number}' is already registered with member "
+                f"'{existing_member.first_name} {existing_member.last_name}' in group '{g_title}'. "
+                "Each group admin must have a unique phone number."
+            )
         raw_password = (
             admin_password.strip()
             if admin_password and admin_password.strip()
@@ -148,6 +161,13 @@ async def _assign_default_group_admin(
             group_id=group.id,
         )
     else:
+        if user.group_id is not None and user.group_id != group.id:
+            existing_grp = await db.get(SocialGroup, user.group_id)
+            g_title = existing_grp.name if existing_grp else "another group"
+            raise BadRequestException(
+                f"Phone number '{admin_phone_number}' is already assigned to group '{g_title}'. "
+                "Please use a different phone number for this group admin."
+            )
         user.role_id = role.id
         user.group_id = group.id
         if admin_password and admin_password.strip():
@@ -179,6 +199,8 @@ async def _assign_default_group_admin(
             last_name=last_name or "",
             contact_phone=user.phone_number or normalized,
             membership_status=MemberStatus.APPROVED.value,
+            is_post_holder=True,
+            post_holder_title="Group Admin",
             is_profile_complete=False,
             profile_data={
                 "full_name": user.full_name,
@@ -191,6 +213,20 @@ async def _assign_default_group_admin(
     else:
         member.user_id = user.id
         member.membership_status = MemberStatus.APPROVED.value
+        member.is_post_holder = True
+        if not member.post_holder_title:
+            member.post_holder_title = "Group Admin"
+        if not member.group_id or member.group_id == group.id:
+            member.group_id = group.id
+            if member.profile_data is None:
+                member.profile_data = {}
+            prof = dict(member.profile_data)
+            prof["social_group_name"] = group.name
+            if group.city:
+                prof["city"] = group.city
+            if group.state:
+                prof["state"] = group.state
+            member.profile_data = prof
 
     await memberships.add_membership(db, member, group)
     await AuditService(db).log(
@@ -843,6 +879,7 @@ async def update_group(
         raise NotFoundException("Group", str(group_id))
     await assert_group_access(db, current_user, group.id)
     updates = body.model_dump(exclude_unset=True)
+    old_name = group.name
     if "state" in updates or "city" in updates:
         state = updates.get("state", group.state)
         city = updates.get("city", group.city)
@@ -854,6 +891,14 @@ async def update_group(
         updates["state"] = place.state
         updates["city"] = place.city
     group = await repo.update(group, **updates)
+    if "name" in updates and updates["name"].strip() != old_name:
+        await db.execute(
+            text(
+                "UPDATE members SET profile_data = jsonb_set(profile_data, '{social_group_name}', :new_name::jsonb) "
+                "WHERE group_id = :gid"
+            ),
+            {"new_name": f'"{updates["name"].strip()}"', "gid": group.id},
+        )
     await AuditService(db).log(
         AuditAction.GROUP_UPDATE, entity_type="group", entity_id=group.id
     )

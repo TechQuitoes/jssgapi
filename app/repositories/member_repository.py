@@ -180,7 +180,14 @@ def group_name_filter(group_name: str):
         )
         .exists()
     )
-    return or_(profile_name == needle, linked_group, legacy_linked)
+    unlinked_profile_match = and_(
+        Member.group_id.is_(None),
+        ~select(MemberGroupMembership.id)
+        .where(MemberGroupMembership.member_id == Member.id)
+        .exists(),
+        profile_name == needle,
+    )
+    return or_(unlinked_profile_match, linked_group, legacy_linked)
 
 
 #: The characters trimmed off a stored designation. ``btrim`` only strips
